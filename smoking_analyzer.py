@@ -208,8 +208,8 @@ class SmokingAnalyzer:
                 cv2.putText(annotated_frame, "IZLEME ALANI", (x_start + 10, y_start + 25), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_ZONE, 2)
 
-                # YOLOv8 Takip İşlemi
-                results = model.track(frame_small, classes=[0], conf=self.conf, persist=True, tracker="bytetrack.yaml", verbose=False)
+                # YOLOv8 Takip İşlemi (Geliştirilmiş custom_tracker.yaml kullanılıyor)
+                results = model.track(frame_small, classes=[0], conf=self.conf, persist=True, tracker="custom_tracker.yaml", verbose=False)
                 current_time = time.time()
                 
                 frame_active_count = 0
@@ -257,8 +257,8 @@ class SmokingAnalyzer:
                                             best_similarity = sim
                                             best_match_id = real_id
 
-                                    # Eşik değeri aşılırsa eski ID ile eşleştir
-                                    if best_match_id is not None and best_similarity > 0.88:
+                                    # Eşik değeri aşılırsa eski ID ile eşleştir (ImageNet Re-ID için 0.77 ideal bir eşiktir)
+                                    if best_match_id is not None and best_similarity > 0.77:
                                         id_map[yolo_id] = best_match_id
                                         # embedding güncelle
                                         old_emb = database[best_match_id]["embedding"]
