@@ -138,6 +138,7 @@ class SmokingAnalyzer:
             id_map = {}
             next_real_id = 0
             last_seen = {}  # Kişinin en son görüldüğü zamanı tutar
+            active_sessions = {}  # Alanda aktif olan kişilerin giriş zamanlarını tutar
             
             fps_buf = []
             last_db_log_time = time.time()
@@ -184,6 +185,8 @@ class SmokingAnalyzer:
                         self._reset_flag = False
                         database.clear()
                         id_map.clear()
+                        last_seen.clear()
+                        active_sessions.clear()
                         next_real_id = 0
 
                 # Çözünürlüğü standardize et (hız ve kararlılık için)
@@ -219,12 +222,12 @@ class SmokingAnalyzer:
                     for box, yolo_id in zip(boxes, ids):
                         bx1, by1, bx2, by2 = box
                         
-                        # İnsan dışı nesneleri elemek için boyut kontrolü
+                        # İnsan dışı nesneleri (ayak, bacak, nesne vb.) elemek için boyut ve oran kontrolü
                         w = bx2 - bx1
                         h = by2 - by1
-                        if w < 30 or h < 60:
+                        if w < 40 or h < 80:  # Minimum tespit boyutunu artırdık
                             continue
-                        if w > h * 1.5:
+                        if h < w * 1.25:      # İnsan dikey olmalı, yatay veya karemsi kutuları (sadece bacak/ayak vb.) ele
                             continue
 
                         # Sınır taşmalarını engelle
@@ -233,7 +236,7 @@ class SmokingAnalyzer:
 
                         # Bounding box alt-orta noktasını kontrol noktası seçelim
                         bc_x = int((bx1 + bx2) / 2.0)
-                        bc_y = bx2 # Y ekseninde ayak hizası en doğrusudur
+                        bc_y = by2 # Y ekseninde ayak hizası en doğrusudur (bx2 koordinat hatası DÜZELTİLDİ!)
 
                         # Kişi izleme bölgesinin içinde mi?
                         is_inside = (x_start <= bc_x <= x_end) and (y_start <= bc_y <= y_end)
@@ -262,10 +265,9 @@ class SmokingAnalyzer:
                                         new_emb = 0.8 * old_emb + 0.2 * embedding
                                         database[best_match_id]["embedding"] = new_emb / np.linalg.norm(new_emb)
                                     else:
-                                        # Yeni kişi kaydı
+                                        # Yeni kişi kaydı (Re-ID veritabanında sadece öznitelik saklanır)
                                         id_map[yolo_id] = next_real_id
                                         database[next_real_id] = {
-                                            "entry_time": current_time,
                                             "embedding": embedding
                                         }
                                         next_real_id += 1
@@ -273,7 +275,14 @@ class SmokingAnalyzer:
                             if yolo_id in id_map:
                                 real_id = id_map[yolo_id]
                                 last_seen[real_id] = current_time
-                                entry_time = database[real_id]["entry_time"]
+                                
+                                # Eğer bu kişi aktif bir ziyarette değilse yeni oturum başlat (Timer ve ihlal kilidi sıfırlanır)
+                                if real_id not in active_sessions:
+                                    active_sessions[real_id] = {"entry_time": current_time}
+                                    with self._lock:
+                                        self.notified_violations.discard(real_id)
+                                
+                                entry_time = active_sessions[real_id]["entry_time"]
                                 time_spent = current_time - entry_time
                                 frame_active_count += 1
 
@@ -319,10 +328,10 @@ class SmokingAnalyzer:
                             cv2.putText(annotated_frame, f"ID:{yolo_id} (Disarida)", (bx1, by1 - 5), 
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
-                    # Pasiflik Temizliği: 15 saniyeden uzun süredir görünmeyen kişileri sil
-                    for rid in list(database.keys()):
+                    # Pasiflik Temizliği: 15 saniyeden uzun süredir görünmeyenlerin aktif oturumunu sonlandır (Re-ID veritabanı silinmez!)
+                    for rid in list(active_sessions.keys()):
                         if rid in last_seen and current_time - last_seen[rid] > 15.0:
-                            database.pop(rid, None)
+                            active_sessions.pop(rid, None)
                             last_seen.pop(rid, None)
                             with self._lock:
                                 self.notified_violations.discard(rid)
