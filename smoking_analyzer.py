@@ -5,6 +5,7 @@ import os
 import queue
 import threading
 import logging
+import pickle
 from collections import defaultdict
 from datetime import datetime
 from ultralytics import YOLO
@@ -109,6 +110,22 @@ class SmokingAnalyzer:
     def _get_cosine_similarity(self, vec1, vec2):
         return 1 - cosine(vec1, vec2)
 
+    def _save_gallery(self, database):
+        try:
+            with open("reid_gallery.pkl", "wb") as f:
+                pickle.dump(database, f)
+        except Exception as e:
+            logger.error(f"Re-ID galerisi kaydedilirken hata: {e}")
+
+    def _load_gallery(self) -> dict:
+        try:
+            if os.path.exists("reid_gallery.pkl"):
+                with open("reid_gallery.pkl", "rb") as f:
+                    return pickle.load(f)
+        except Exception as e:
+            logger.error(f"Re-ID galerisi yuklenirken hata: {e}")
+        return {}
+
     def _run_loop(self) -> None:
         try:
             logger.info("YOLOv8 Modeli yükleniyor...")
@@ -134,9 +151,9 @@ class SmokingAnalyzer:
             target_w, target_h = 1280, 720
             
             # Re-ID takip veritabanı
-            database = {}
+            database = self._load_gallery()
             id_map = {}
-            next_real_id = 0
+            next_real_id = max(database.keys()) + 1 if database else 0
             last_seen = {}  # Kişinin en son görüldüğü zamanı tutar
             active_sessions = {}  # Alanda aktif olan kişilerin giriş zamanlarını tutar
             
@@ -188,6 +205,13 @@ class SmokingAnalyzer:
                         last_seen.clear()
                         active_sessions.clear()
                         next_real_id = 0
+                        # Kalıcı dosyayı da sil
+                        if os.path.exists("reid_gallery.pkl"):
+                            try:
+                                os.remove("reid_gallery.pkl")
+                                logger.info("Kalıcı Re-ID dosyası temizlendi.")
+                            except:
+                                pass
 
                 # Çözünürlüğü standardize et (hız ve kararlılık için)
                 frame_small = cv2.resize(frame, (target_w, target_h))
@@ -264,6 +288,7 @@ class SmokingAnalyzer:
                                         old_emb = database[best_match_id]["embedding"]
                                         new_emb = 0.8 * old_emb + 0.2 * embedding
                                         database[best_match_id]["embedding"] = new_emb / np.linalg.norm(new_emb)
+                                        self._save_gallery(database)
                                     else:
                                         # Yeni kişi kaydı (Re-ID veritabanında sadece öznitelik saklanır)
                                         id_map[yolo_id] = next_real_id
@@ -271,6 +296,7 @@ class SmokingAnalyzer:
                                             "embedding": embedding
                                         }
                                         next_real_id += 1
+                                        self._save_gallery(database)
 
                             if yolo_id in id_map:
                                 real_id = id_map[yolo_id]
