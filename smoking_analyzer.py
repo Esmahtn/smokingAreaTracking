@@ -137,6 +137,7 @@ class SmokingAnalyzer:
             database = {}
             id_map = {}
             next_real_id = 0
+            last_seen = {}  # Kişinin en son görüldüğü zamanı tutar
             
             fps_buf = []
             last_db_log_time = time.time()
@@ -254,7 +255,7 @@ class SmokingAnalyzer:
                                             best_match_id = real_id
 
                                     # Eşik değeri aşılırsa eski ID ile eşleştir
-                                    if best_match_id is not None and best_similarity > 0.65:
+                                    if best_match_id is not None and best_similarity > 0.88:
                                         id_map[yolo_id] = best_match_id
                                         # embedding güncelle
                                         old_emb = database[best_match_id]["embedding"]
@@ -271,6 +272,7 @@ class SmokingAnalyzer:
 
                             if yolo_id in id_map:
                                 real_id = id_map[yolo_id]
+                                last_seen[real_id] = current_time
                                 entry_time = database[real_id]["entry_time"]
                                 time_spent = current_time - entry_time
                                 frame_active_count += 1
@@ -316,6 +318,18 @@ class SmokingAnalyzer:
                             cv2.rectangle(annotated_frame, (bx1, by1), (bx2, by2), color, 1)
                             cv2.putText(annotated_frame, f"ID:{yolo_id} (Disarida)", (bx1, by1 - 5), 
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+                    # Pasiflik Temizliği: 15 saniyeden uzun süredir görünmeyen kişileri sil
+                    for rid in list(database.keys()):
+                        if rid in last_seen and current_time - last_seen[rid] > 15.0:
+                            database.pop(rid, None)
+                            last_seen.pop(rid, None)
+                            with self._lock:
+                                self.notified_violations.discard(rid)
+                            # id_map içindeki bu rid'ye eşleşen tüm yolo_id'leri sil
+                            for yid in list(id_map.keys()):
+                                if id_map[yid] == rid:
+                                    id_map.pop(yid, None)
 
                 # İstatistikleri güncelle
                 with self._lock:
