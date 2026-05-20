@@ -2,3 +2,8 @@ opencv-python
 mediapipe
 scipy
 numpy
+flask
+ultralytics
+torch
+torchvision
+pillow

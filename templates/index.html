@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Sigara Alanı Takip Paneli v2.0</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #ff3e3e;
+            --primary-glow: rgba(255, 62, 62, 0.4);
+            --bg: #0a0a0f;
+            --card-bg: rgba(20, 20, 30, 0.7);
+            --text: #ffffff;
+            --text-dim: #a0a0b0;
+            --border: rgba(255, 255, 255, 0.1);
+            --success: #00ff88;
+            --blue-glow: rgba(62, 139, 255, 0.4);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Outfit', sans-serif; }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(255, 62, 62, 0.05) 0%, transparent 40%),
+                radial-gradient(circle at 90% 80%, rgba(62, 139, 255, 0.05) 0%, transparent 40%);
+            min-height: 100vh;
+        }
+
+        .container { max-width: 1400px; margin: 0 auto; padding: 2rem; }
+
+        header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; }
+        .logo { font-size: 1.8rem; font-weight: 800; }
+        .logo span { color: var(--primary); text-shadow: 0 0 20px var(--primary-glow); }
+
+        .main-grid { display: grid; grid-template-columns: 1fr 380px; gap: 2rem; }
+
+        .video-card {
+            background: var(--card-bg);
+            border-radius: 24px;
+            border: 1px solid var(--border);
+            overflow: hidden;
+            position: relative;
+        }
+
+        .video-container {
+            width: 100%;
+            aspect-ratio: 16/9;
+            background: #000;
+            position: relative;
+            cursor: crosshair;
+        }
+
+        .video-container img { width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+        
+        /* Canvas for drawing rectangle zone */
+        #drawCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+        }
+
+        .controls { padding: 1.5rem; display: flex; flex-direction: column; gap: 1rem; border-top: 1px solid var(--border); }
+        .input-row { display: flex; gap: 1rem; flex-wrap: wrap; }
+        .input-group { flex: 1; min-width: 150px; }
+        
+        input { width: 100%; background: rgba(255, 255, 255, 0.05); border: 1px solid var(--border); padding: 12px; border-radius: 12px; color: white; outline: none; font-size: 0.9rem; }
+        input:focus { border-color: var(--primary); background: rgba(255, 255, 255, 0.1); }
+
+        .btn { padding: 12px 24px; border-radius: 12px; font-weight: 600; cursor: pointer; border: none; transition: 0.3s; white-space: nowrap; }
+        .btn-primary { background: var(--primary); color: white; box-shadow: 0 10px 20px -5px var(--primary-glow); }
+        .btn-secondary { background: rgba(255, 255, 255, 0.1); color: white; }
+
+        .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
+        .stat-card { background: var(--card-bg); padding: 1.5rem; border-radius: 20px; border: 1px solid var(--border); transition: 0.3s; }
+        .stat-label { font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase; }
+        .stat-value { font-size: 2.2rem; font-weight: 800; display: block; }
+
+        .charts-container { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 1rem; }
+        .chart-card { background: var(--card-bg); border-radius: 24px; border: 1px solid var(--border); padding: 1.2rem; height: 300px; }
+
+        .history-card { background: var(--card-bg); border-radius: 24px; border: 1px solid var(--border); padding: 1.5rem; max-height: 400px; overflow: hidden; display: flex; flex-direction: column; }
+        .history-list { overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 12px; padding-top: 5px; }
+        
+        .history-item { 
+            display: flex; 
+            align-items: center; 
+            gap: 12px; 
+            padding: 8px; 
+            background: rgba(255, 255, 255, 0.02); 
+            border-radius: 12px; 
+            border: 1px solid var(--border);
+            transition: 0.2s;
+        }
+        .history-item:hover {
+            background: rgba(255, 62, 62, 0.05);
+            border-color: rgba(255, 62, 62, 0.2);
+        }
+
+        .violation-thumb {
+            width: 48px;
+            height: 48px;
+            object-fit: cover;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            cursor: pointer;
+            transition: transform 0.2s, border-color 0.2s;
+        }
+        .violation-thumb:hover {
+            transform: scale(1.15);
+            border-color: var(--primary);
+            box-shadow: 0 0 8px var(--primary-glow);
+        }
+
+        .report-table-card {
+            background: var(--card-bg);
+            border-radius: 24px;
+            border: 1px solid var(--border);
+            padding: 1.5rem;
+            margin-top: 2rem;
+            width: 100%;
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 1rem;
+        }
+
+        th {
+            text-align: left;
+            color: var(--text-dim);
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            padding: 12px;
+            border-bottom: 2px solid var(--border);
+        }
+
+        td {
+            padding: 12px;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.9rem;
+        }
+
+        tr:hover { background: rgba(255,255,255,0.02); }
+
+        .fps-badge { position: absolute; top: 1rem; right: 1rem; background: rgba(0,0,0,0.6); padding: 4px 12px; border-radius: 100px; font-size: 0.7rem; z-index: 20; }
+        
+        .status-badge { padding: 6px 12px; border-radius: 100px; font-size: 0.8rem; background: rgba(255,255,255,0.05); }
+        .status-running { color: #00ff88; border: 1px solid #00ff8844; }
+
+        .hint { font-size: 0.7rem; color: var(--text-dim); margin-top: 5px; }
+
+        /* Lightbox CSS Modal */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            padding-top: 100px;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            overflow: auto;
+            background-color: rgba(0,0,0,0.92);
+            backdrop-filter: blur(5px);
+        }
+        .modal-content {
+            margin: auto;
+            display: block;
+            max-width: 80%;
+            max-height: 80%;
+            object-fit: contain;
+            border-radius: 16px;
+            border: 2px solid var(--primary);
+            box-shadow: 0 0 40px var(--primary-glow);
+            animation: zoom 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+        @keyframes zoom {
+            from {transform:scale(0.3); opacity: 0;} 
+            to {transform:scale(1); opacity: 1;}
+        }
+        .close {
+            position: absolute;
+            top: 40px;
+            right: 45px;
+            color: #f1f1f1;
+            font-size: 50px;
+            font-weight: 800;
+            transition: 0.3s;
+            cursor: pointer;
+        }
+        .close:hover {
+            color: var(--primary);
+            text-shadow: 0 0 10px var(--primary-glow);
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo">AI <span>SMOKING</span> TRACKER</div>
+            <div id="statusBadge" class="status-badge">DURDURULDU</div>
+        </header>
+
+        <div class="main-grid">
+            <div class="left-col">
+                <div class="video-card">
+                    <div class="fps-badge">FPS: <span id="fpsValue">0.0</span></div>
+                    <div class="video-container" id="videoContainer">
+                        <img src="/video_feed" alt="Video">
+                        <canvas id="drawCanvas"></canvas>
+                    </div>
+                    <div class="controls">
+                        <div class="input-row">
+                            <div class="input-group">
+                                <label class="hint">KAMERA IP / AKIŞ ADRESİ</label>
+                                <input type="text" id="camIp" placeholder="192.168.12.71" value="192.168.12.71">
+                            </div>
+                            <div class="input-group">
+                                <label class="hint">KULLANICI ADI</label>
+                                <input type="text" id="camUser" placeholder="admin" value="admin">
+                            </div>
+                            <div class="input-group">
+                                <label class="hint">PAROLA</label>
+                                <input type="password" id="camPass" placeholder="******" value="Yt2240cn">
+                            </div>
+                            <div class="input-group" style="max-width: 130px;">
+                                <label class="hint">SÜRE LİMİTİ (SN)</label>
+                                <input type="number" id="timeLimit" placeholder="60" value="60">
+                            </div>
+                        </div>
+                        <div style="display:flex; gap:1rem; align-items:center;">
+                            <div style="flex:1;">
+                                <div class="hint">Ekrana fareyle tıklayıp sürükleyerek <b>izleme bölgesini (ROI)</b> dikdörtgen olarak çizin.</div>
+                            </div>
+                            <button id="startBtn" class="btn btn-primary">TAKİBİ BAŞLAT</button>
+                            <button id="stopBtn" class="btn btn-secondary">DURDUR</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="charts-container">
+                    <div class="chart-card"><canvas id="distributionChart"></canvas></div>
+                    <div class="chart-card"><canvas id="timeChart"></canvas></div>
+                </div>
+            </div>
+
+            <div class="sidebar">
+                <div class="stats-grid">
+                    <div class="stat-card" style="box-shadow: 0 5px 15px -5px var(--blue-glow);"><span class="stat-label">AKTİF KİŞİ</span><span id="activeCount" class="stat-value" style="color: #3e8bff;">0</span></div>
+                    <div class="stat-card" style="box-shadow: 0 5px 15px -5px var(--primary-glow);"><span class="stat-label">TOPLAM İHLAL</span><span id="violationCount" class="stat-value" style="color: #ff3e3e;">0</span></div>
+                </div>
+                <div class="history-card" style="min-height: 430px;">
+                    <div style="display:flex; justify-content:space-between; margin-bottom:1rem; align-items: center;">
+                        <b style="font-size: 0.95rem; color: #ff3e3e;">İHLAL GEÇMİŞİ</b>
+                        <span class="hint" style="margin-top: 0;">Fotoğrafa tıklayarak büyütebilirsiniz</span>
+                    </div>
+                    <div id="historyList" class="history-list">
+                        <!-- İhlal Kayıtları buraya gelecek -->
+                    </div>
+                </div>
+                <button onclick="resetStats()" class="btn btn-secondary" style="width:100%; margin-top:1rem; color:var(--primary); font-weight:800;">VERİLERİ SIFIRLA</button>
+            </div>
+        </div>
+
+        <!-- Saatlik Rapor Tablosu -->
+        <div class="report-table-card" style="margin-top: 2rem;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+                <h3 style="font-weight: 600; color: #ff3e3e; text-shadow: 0 0 10px rgba(255, 62, 62, 0.2);">SAATLİK SİGARA ALANI YOĞUNLUĞU</h3>
+                <span class="hint">Saat başı kaydedilen maksimum aktif kişi ve ihlal sayıları.</span>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Tarih ve Saat Aralığı</th>
+                        <th>Maksimum Aktif Kişi</th>
+                        <th>Maksimum İhlal</th>
+                        <th>Yoğunluk Skoru</th>
+                    </tr>
+                </thead>
+                <tbody id="hourlyTableBody">
+                    <!-- Veriler buraya gelecek -->
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Dakikalık Loglar -->
+        <div class="report-table-card" style="margin-top: 1.5rem; opacity: 0.8; font-size: 0.8rem;">
+            <h4 style="font-weight: 400; margin-bottom: 0.5rem; color: var(--text-dim);">Son Sistem Kayıtları (Dakikalık Özet)</h4>
+            <table>
+                <tbody id="reportTableBody"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Lightbox Modal Yapısı -->
+    <div id="imageModal" class="modal">
+        <span class="close" onclick="closeLightbox()">&times;</span>
+        <img class="modal-content" id="modalImg">
+    </div>
+
+    <script>
+        const canvas = document.getElementById('drawCanvas');
+        const ctx = canvas.getContext('2d');
+        const videoContainer = document.getElementById('videoContainer');
+        
+        let isDrawing = false;
+        let startX, startY;
+        let zoneCoords = [0.0, 0.0, 1.0, 1.0]; // Varsayılan: Tüm ekran
+
+        function resizeCanvas() {
+            canvas.width = videoContainer.clientWidth;
+            canvas.height = videoContainer.clientHeight;
+            drawCurrentZone();
+        }
+
+        function drawCurrentZone() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // Eğer varsayılan tam ekransa çizim yapmaya gerek yok
+            if (zoneCoords[0] === 0 && zoneCoords[1] === 0 && zoneCoords[2] === 1 && zoneCoords[3] === 1) {
+                return;
+            }
+
+            ctx.strokeStyle = '#ff3e3e';
+            ctx.lineWidth = 3;
+            ctx.setLineDash([6, 4]);
+            
+            const x1 = zoneCoords[0] * canvas.width;
+            const y1 = zoneCoords[1] * canvas.height;
+            const w = (zoneCoords[2] - zoneCoords[0]) * canvas.width;
+            const h = (zoneCoords[3] - zoneCoords[1]) * canvas.height;
+            
+            ctx.strokeRect(x1, y1, w, h);
+            
+            // Neon Işıma Etkisi
+            ctx.shadowBlur = 12;
+            ctx.shadowColor = '#ff3e3e';
+            ctx.strokeRect(x1, y1, w, h);
+            ctx.shadowBlur = 0;
+            
+            // Etiket
+            ctx.fillStyle = "white";
+            ctx.font = "bold 11px Outfit";
+            ctx.fillText("TAKİP ALANI (ROI)", x1 + 10, y1 - 10);
+        }
+
+        canvas.addEventListener('mousedown', e => {
+            isDrawing = true;
+            const rect = canvas.getBoundingClientRect();
+            startX = e.clientX - rect.left;
+            startY = e.clientY - rect.top;
+        });
+
+        canvas.addEventListener('mousemove', e => {
+            if (!isDrawing) return;
+            const rect = canvas.getBoundingClientRect();
+            const currX = e.clientX - rect.left;
+            const currY = e.clientY - rect.top;
+            
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            ctx.strokeStyle = 'white';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([4, 4]);
+            ctx.strokeRect(startX, startY, currX - startX, currY - startY);
+        });
+
+        canvas.addEventListener('mouseup', e => {
+            isDrawing = false;
+            const rect = canvas.getBoundingClientRect();
+            const endX = e.clientX - rect.left;
+            const endY = e.clientY - rect.top;
+
+            // Koordinatları normalize edip düzenle
+            const x1 = Math.min(startX, endX) / canvas.width;
+            const y1 = Math.min(startY, endY) / canvas.height;
+            const x2 = Math.max(startX, endX) / canvas.width;
+            const y2 = Math.max(startY, endY) / canvas.height;
+
+            // Çok küçük tıklamaları engelle
+            if (Math.abs(x2 - x1) > 0.02 && Math.abs(y2 - y1) > 0.02) {
+                zoneCoords = [x1, y1, x2, y2];
+            }
+            
+            drawCurrentZone();
+            updateZoneOnBackend();
+        });
+
+        async function updateZoneOnBackend() {
+            if (document.getElementById('statusBadge').innerText === "ÇALIŞIYOR") {
+                await fetch("/api/update_zone", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ zone_coords: zoneCoords })
+                });
+            }
+        }
+
+        // Süre Sınırı değişince backend'e gönder
+        document.getElementById('timeLimit').onchange = async (e) => {
+            const limit = parseInt(e.target.value) || 60;
+            if (document.getElementById('statusBadge').innerText === "ÇALIŞIYOR") {
+                await fetch("/api/update_time_limit", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ time_limit: limit })
+                });
+            }
+        };
+
+        // Lightbox Fonksiyonları
+        function openLightbox(src) {
+            const modal = document.getElementById("imageModal");
+            const modalImg = document.getElementById("modalImg");
+            modal.style.display = "block";
+            modalImg.src = src;
+        }
+
+        function closeLightbox() {
+            document.getElementById("imageModal").style.display = "none";
+        }
+
+        // Kapatma tuşu dışındaki yerlere tıklandığında da kapansın
+        window.onclick = function(event) {
+            const modal = document.getElementById("imageModal");
+            if (event.target === modal) {
+                modal.style.display = "none";
+            }
+        }
+
+        // Grafikler (Charts)
+        let distributionChart, timeChart;
+        function initCharts() {
+            distributionChart = new Chart(document.getElementById('distributionChart'), {
+                type: 'doughnut',
+                data: { 
+                    labels:['Aktif Normal', 'İhlal Yapan'], 
+                    datasets:[{
+                        data:[0, 0], 
+                        backgroundColor:['#3e8bff','#ff3e3e'],
+                        borderWidth: 1,
+                        borderColor: '#14141e'
+                    }] 
+                },
+                options: { 
+                    maintainAspectRatio:false, 
+                    plugins:{
+                        legend:{
+                            position:'bottom', 
+                            labels:{color:'white', font:{family:'Outfit', size:11}}
+                        }
+                    } 
+                }
+            });
+
+            timeChart = new Chart(document.getElementById('timeChart'), {
+                type: 'line',
+                data: { 
+                    labels:[], 
+                    datasets:[
+                        {
+                            label:'Aktif Kişiler', 
+                            data:[], 
+                            borderColor:'#3e8bff', 
+                            backgroundColor:'rgba(62,139,255,0.05)', 
+                            fill:true,
+                            tension: 0.3
+                        },
+                        {
+                            label:'İhlaller', 
+                            data:[], 
+                            borderColor:'#ff3e3e', 
+                            backgroundColor:'rgba(255,62,62,0.08)', 
+                            fill:true,
+                            tension: 0.3
+                        }
+                    ] 
+                },
+                options: { 
+                    maintainAspectRatio:false, 
+                    plugins:{
+                        legend:{
+                            display:true,
+                            labels:{color:'white', font:{family:'Outfit', size:11}}
+                        }
+                    }, 
+                    scales:{
+                        x:{ticks:{color:'#aaa', font:{family:'Outfit'}}, grid:{color:'rgba(255,255,255,0.05)'}}, 
+                        y:{
+                            ticks:{color:'#aaa', precision:0, stepSize:1, font:{family:'Outfit'}},
+                            beginAtZero: true,
+                            grid:{color:'rgba(255,255,255,0.05)'}
+                        }
+                    } 
+                }
+            });
+        }
+
+        // SSE (Server Sent Events) ile Anlık Veri Akışı
+        const evtSource = new EventSource("/api/stream");
+        evtSource.onmessage = e => {
+            const d = JSON.parse(e.data);
+            document.getElementById('activeCount').innerText = d.active;
+            document.getElementById('violationCount').innerText = d.violation;
+            document.getElementById('fpsValue').innerText = d.fps;
+            
+            // Doughnut Güncelle
+            const activeNormal = Math.max(0, d.active - d.violation);
+            distributionChart.data.datasets[0].data = [activeNormal, d.violation];
+            distributionChart.update('none');
+
+            // Durum Rozeti Güncelle
+            const badge = document.getElementById('statusBadge');
+            badge.innerText = d.status === "running" ? "ÇALIŞIYOR" : "DURDURULDU";
+            badge.className = d.status === "running" ? "status-badge status-running" : "status-badge";
+        };
+
+        // Takibi Başlat Butonu
+        document.getElementById('startBtn').onclick = async () => {
+            const ip = document.getElementById('camIp').value.trim();
+            const user = document.getElementById('camUser').value.trim();
+            const pass = document.getElementById('camPass').value.trim();
+            const limit = parseInt(document.getElementById('timeLimit').value) || 60;
+            
+            // RTSP URL Oluşturma (ip url ise doğrudan al, değilse Dahua şablonu oluştur)
+            let source = ip;
+            if (ip.includes('.') && !ip.startsWith('rtsp') && !ip.startsWith('http')) {
+                source = `rtsp://${user}:${pass}@${ip}:554/cam/realmonitor?channel=1&subtype=0`;
+            }
+
+            await fetch("/api/start", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ 
+                    source: source, 
+                    zone_coords: zoneCoords,
+                    time_limit: limit
+                })
+            });
+            
+            setTimeout(updateHistory, 2000);
+        };
+
+        // Durdur Butonu
+        document.getElementById('stopBtn').onclick = async () => { 
+            await fetch("/api/stop", {method:"POST"}); 
+        };
+
+        // Verileri Sıfırla Butonu
+        async function resetStats() {
+            if (confirm("Tüm istatistikler, veritabanı logları ve kaydedilmiş ihlal ekran görüntüleri silinecektir. Emin misiniz?")) {
+                await fetch("/api/reset", {method:"POST"});
+                updateHistory();
+            }
+        }
+
+        // İhlal Geçmişi ve Tabloları Güncelleme
+        async function updateHistory() {
+            const res = await fetch("/api/reports");
+            if (!res.ok) return;
+            const data = await res.json();
+            
+            const resHourly = await fetch("/api/hourly_report");
+            if (!resHourly.ok) return;
+            const hourlyData = await resHourly.json();
+
+            // 1. İhlal Kayıtları Listesini Güncelle (Thumbnail önizlemeli)
+            const historyList = document.getElementById('historyList');
+            if (data.violations.length === 0) {
+                historyList.innerHTML = `<div style="text-align:center; color:var(--text-dim); margin-top:2rem; font-size:0.8rem;">Henüz ihlal kaydı bulunmuyor.</div>`;
+            } else {
+                historyList.innerHTML = data.violations.slice(0, 30).map(i => `
+                    <div class="history-item">
+                        <img src="/${i.image_path}" class="violation-thumb" onclick="openLightbox('/${i.image_path}')" title="Büyütmek için tıklayın">
+                        <div style="flex: 1;">
+                            <div style="font-weight: 600; color: #ff3e3e; font-size: 0.9rem;">Kişi #${i.person_id} İHLAL!</div>
+                            <div style="font-size: 0.75rem; color: var(--text-dim); margin-top: 2px;">
+                                ${i.timestamp.split(' ')[1]} • Süre: <span style="color: white; font-weight: 600;">${i.duration}s</span>
+                            </div>
+                        </div>
+                    </div>
+                `).join('');
+            }
+
+            // 2. Saatlik Yoğunluk Tablosunu Güncelle
+            document.getElementById('hourlyTableBody').innerHTML = hourlyData.map(i => {
+                const hour = i.hour_start.split(' ')[1].split(':')[0];
+                const nextHour = String(parseInt(hour) + 1).padStart(2, '0');
+                const range = `${hour}:00 - ${nextHour}:00`;
+                
+                // Yoğunluk skoru hesaplama (örneğin aktif max + ihlal max)
+                const score = i.active_total + i.violation_total;
+                let scoreText = "Düşük";
+                let scoreColor = "#00ff88";
+                if (score > 8) {
+                    scoreText = "Aşırı Yoğun";
+                    scoreColor = "#ff3e3e";
+                } else if (score > 4) {
+                    scoreText = "Orta Yoğun";
+                    scoreColor = "#ff9f3e";
+                }
+
+                return `
+                    <tr>
+                        <td style="font-weight:600; color:#ff3e3e;">${i.hour_start.split(' ')[0]} | ${range}</td>
+                        <td style="color:#3e8bff; font-weight:600;">${i.active_total}</td>
+                        <td style="color:#ff3e3e; font-weight:600;">${i.violation_total}</td>
+                        <td style="font-weight:800; color:${scoreColor};">${scoreText} (${score})</td>
+                    </tr>
+                `;
+            }).join('');
+
+            // 3. Sistem Dakikalık Log Tablosu
+            document.getElementById('reportTableBody').innerHTML = data.logs.slice(0, 10).map(i => `
+                <tr>
+                    <td style="color:#aaa;">${i.timestamp}</td>
+                    <td style="color:#3e8bff;">Aktif Kişi: ${i.active_count}</td>
+                    <td style="color:#ff3e3e;">İhlal Sayısı: ${i.violation_count}</td>
+                </tr>
+            `).join('');
+
+            // 4. Grafik Zaman Serisini Güncelle (Hourly data üzerinden)
+            const chartData = [...hourlyData].reverse();
+            timeChart.data.labels = chartData.map(i => i.hour_start.split(' ')[1].substring(0,5));
+            timeChart.data.datasets[0].data = chartData.map(i => i.active_total);
+            timeChart.data.datasets[1].data = chartData.map(i => i.violation_total);
+            timeChart.update();
+        }
+
+        // Otomatik Güncelleme (Her 5 saniyede bir tabloları yeniler)
+        setInterval(updateHistory, 5000);
+
+        window.onload = () => {
+            initCharts();
+            updateHistory();
+            resizeCanvas();
+        };
+        
+        window.onresize = resizeCanvas;
+    </script>
+</body>
+</html>
