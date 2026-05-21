@@ -105,8 +105,10 @@ def api_start():
 
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
-    if analyzer: 
+    global analyzer
+    if analyzer:
         analyzer.stop()
+        analyzer = None
     return jsonify({"ok": True})
 
 @app.route("/api/update_zone", methods=["POST"])
@@ -155,6 +157,31 @@ def api_reports():
         "violations": violations,
         "logs": logs
     })
+
+@app.route("/api/delete_violation", methods=["POST"])
+def api_delete_violation():
+    b = request.get_json(silent=True) or {}
+    violation_id = b.get("id")
+    if violation_id is None:
+        return jsonify({"ok": False, "error": "Eksik id parametresi."}), 400
+    try:
+        db_manager.delete_violation(int(violation_id))
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route("/api/clear_violations", methods=["POST"])
+def api_clear_violations():
+    db_manager.clear_violations()
+    violations_dir = Path("static/violations")
+    if violations_dir.exists():
+        for file in violations_dir.iterdir():
+            if file.is_file():
+                try:
+                    file.unlink()
+                except Exception as e:
+                    logging.error(f"Görsel silinirken hata: {e}")
+    return jsonify({"ok": True})
 
 @app.route("/api/hourly_report")
 def api_hourly_report():

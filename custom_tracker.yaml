@@ -4,6 +4,8 @@
 tracker_type: bytetrack
 track_high_thresh: 0.4  # İlk eşleştirme için algılama güven eşiği (Hafifçe düşürüldü ki kıpırdanmada kaybolmasın)
 track_low_thresh: 0.1   # İkinci eşleştirme için düşük güven eşiği
-new_track_thresh: 0.5   # Yeni bir takip başlatmak için gereken eşik
-track_buffer: 120       # Kaybolan takipleri hafızada tutma süresi (Kare sayısı). 30'dan 120'ye (yaklaşık 4-6 saniye) çıkarıldı!
+new_track_thresh: 0.45  # Yeni bir takip başlatmak için gereken eşik
+track_buffer: 240       # Kaybolan takipleri hafızada tutma süresi (Kare sayısı). Daha uzun süreyle ID kaybını azaltır.
 match_thresh: 0.8       # İz eşleştirme eşiği (Intersection over Union)
+
+fuse_score: False

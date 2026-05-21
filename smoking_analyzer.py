@@ -53,6 +53,8 @@ class SmokingAnalyzer:
         
         # İhlali bildirilen ID'ler (Tekrar tekrar resim çekilmesini önlemek için)
         self.notified_violations = set()
+        # Hiç bir noktada ihlal eden tüm ID'leri takip et (kümülatif sayım için)
+        self.all_violations_ever = set()
 
     @property
     def stats(self) -> dict:
@@ -82,15 +84,23 @@ class SmokingAnalyzer:
             self._violation_count = 0
             self._status = "running"
             self.notified_violations.clear()
+        # Her yeni başlangıçta eski Re-ID verisini temizle, böylece önceki oturumdaki ID kalıcılığı sıfırlanır
+        try:
+            if os.path.exists("reid_gallery.pkl"):
+                os.remove("reid_gallery.pkl")
+                logger.info("Eski Re-ID galerisi silindi, yeni oturum için temiz başlangıç yapıldı.")
+        except Exception as e:
+            logger.warning(f"Re-ID galerisi silinirken hata oluştu: {e}")
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
         return True
 
     def stop(self) -> None:
         self._stop_event.set()
-        if self._thread: 
+        if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2)
-        self._status = "stopped"
+        with self._lock:
+            self._status = "stopped"
 
     def reset_counts(self) -> None:
         with self._lock:
@@ -98,6 +108,7 @@ class SmokingAnalyzer:
             self._violation_count = 0
             self._reset_flag = True
             self.notified_violations.clear()
+            self.all_violations_ever.clear()
 
     def update_zone(self, coords: list):
         with self._lock:
@@ -148,7 +159,7 @@ class SmokingAnalyzer:
             if not cap.isOpened(): 
                 raise RuntimeError(f"Kaynak açilamadi: {self.source}")
 
-            target_w, target_h = 1280, 720
+            target_w, target_h = 960, 540
             
             # Re-ID takip veritabanı
             database = self._load_gallery()
@@ -205,6 +216,7 @@ class SmokingAnalyzer:
                         last_seen.clear()
                         active_sessions.clear()
                         next_real_id = 0
+                        self.all_violations_ever.clear()
                         # Kalıcı dosyayı da sil
                         if os.path.exists("reid_gallery.pkl"):
                             try:
@@ -237,7 +249,7 @@ class SmokingAnalyzer:
                 current_time = time.time()
                 
                 frame_active_count = 0
-                frame_violation_count = 0
+                violators = set()
 
                 if results[0].boxes.id is not None:
                     boxes = results[0].boxes.xyxy.cpu().numpy().astype(int)
@@ -290,13 +302,33 @@ class SmokingAnalyzer:
                                         database[best_match_id]["embedding"] = new_emb / np.linalg.norm(new_emb)
                                         self._save_gallery(database)
                                     else:
-                                        # Yeni kişi kaydı (Re-ID veritabanında sadece öznitelik saklanır)
-                                        id_map[yolo_id] = next_real_id
-                                        database[next_real_id] = {
-                                            "embedding": embedding
-                                        }
-                                        next_real_id += 1
-                                        self._save_gallery(database)
+                                        # Re-ID başarısızsa, yakın zamanda görülen aynı kişiyi merkezine göre eşleştirmeyi dene
+                                        fallback_id = None
+                                        fallback_dist = float("inf")
+                                        for rid, session in active_sessions.items():
+                                            if rid in last_seen and current_time - last_seen[rid] < 5.0:
+                                                cx, cy = session.get("last_center", (None, None))
+                                                if cx is None:
+                                                    continue
+                                                dist = np.hypot(bc_x - cx, bc_y - cy)
+                                                if dist < 200 and dist < fallback_dist:
+                                                    fallback_id = rid
+                                                    fallback_dist = dist
+
+                                        if fallback_id is not None:
+                                            id_map[yolo_id] = fallback_id
+                                            old_emb = database[fallback_id]["embedding"]
+                                            new_emb = 0.8 * old_emb + 0.2 * embedding
+                                            database[fallback_id]["embedding"] = new_emb / np.linalg.norm(new_emb)
+                                            self._save_gallery(database)
+                                        else:
+                                            # Yeni kişi kaydı (Re-ID veritabanında sadece öznitelik saklanır)
+                                            id_map[yolo_id] = next_real_id
+                                            database[next_real_id] = {
+                                                "embedding": embedding
+                                            }
+                                            next_real_id += 1
+                                            self._save_gallery(database)
 
                             if yolo_id in id_map:
                                 real_id = id_map[yolo_id]
@@ -304,16 +336,21 @@ class SmokingAnalyzer:
                                 
                                 # Eğer bu kişi aktif bir ziyarette değilse yeni oturum başlat (Timer ve ihlal kilidi sıfırlanır)
                                 if real_id not in active_sessions:
-                                    active_sessions[real_id] = {"entry_time": current_time}
+                                    active_sessions[real_id] = {"entry_time": current_time, "last_center": (bc_x, bc_y)}
                                     with self._lock:
                                         self.notified_violations.discard(real_id)
+                                else:
+                                    active_sessions[real_id]["last_center"] = (bc_x, bc_y)
                                 
                                 entry_time = active_sessions[real_id]["entry_time"]
                                 time_spent = current_time - entry_time
                                 frame_active_count += 1
 
                                 if time_spent > curr_time_limit:
-                                    frame_violation_count += 1
+                                    violators.add(real_id)
+                                    # Kümülatif ihlal takip: tüm ihlal edenler buraya eklenir
+                                    with self._lock:
+                                        self.all_violations_ever.add(real_id)
                                     color = COLOR_VIOLATION
                                     text = f"ID:{real_id} IHLAL! ({int(time_spent)}s)"
 
@@ -336,9 +373,13 @@ class SmokingAnalyzer:
                                             rel_path = f"static/violations/{filename}"
                                             
                                             # Kaydet ve veritabanına ekle
-                                            cv2.imwrite(rel_path, crop_img)
-                                            db_manager.add_violation(real_id, int(time_spent), rel_path)
-                                            logger.info(f"İhlal Fotoğrafı Kaydedildi: {rel_path}")
+                                            saved = cv2.imwrite(rel_path, crop_img)
+                                            if saved:
+                                                db_manager.add_violation(real_id, int(time_spent), rel_path)
+                                                logger.info(f"İhlal Fotoğrafı Kaydedildi: {rel_path}")
+                                            else:
+                                                logger.error(f"İhlal fotoğrafı kaydedilemedi: {rel_path}")
+                                                db_manager.add_violation(real_id, int(time_spent), rel_path)
                                 else:
                                     color = COLOR_ACTIVE
                                     text = f"ID:{real_id} {int(time_spent)}s"
@@ -366,10 +407,13 @@ class SmokingAnalyzer:
                                 if id_map[yid] == rid:
                                     id_map.pop(yid, None)
 
+                frame_violation_count = len(violators)
+
                 # İstatistikleri güncelle
                 with self._lock:
                     self._active_count = frame_active_count
-                    self._violation_count = frame_violation_count
+                    # Kümülatif ihlal sayısını kullan (o saatteki toplam ihlal eden kişi sayısı)
+                    self._violation_count = len(self.all_violations_ever)
 
                 # FPS Hesabı
                 fps_buf.append(time.time() - t0)

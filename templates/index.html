@@ -207,7 +207,10 @@
     <div class="container">
         <header>
             <div class="logo">AI <span>SMOKING</span> TRACKER</div>
-            <div id="statusBadge" class="status-badge">DURDURULDU</div>
+            <div>
+                <div id="statusBadge" class="status-badge">DURDURULDU</div>
+                <div id="statusMessage" class="hint" style="margin-top:0.3rem; text-align:right;">Sunucu hazır</div>
+            </div>
         </header>
 
         <div class="main-grid">
@@ -241,8 +244,8 @@
                             <div style="flex:1;">
                                 <div class="hint">Ekrana fareyle tıklayıp sürükleyerek <b>izleme bölgesini (ROI)</b> dikdörtgen olarak çizin.</div>
                             </div>
-                            <button id="startBtn" class="btn btn-primary">TAKİBİ BAŞLAT</button>
-                            <button id="stopBtn" class="btn btn-secondary">DURDUR</button>
+                            <button id="startBtn" class="btn btn-primary" type="button">TAKİBİ BAŞLAT</button>
+                            <button id="stopBtn" class="btn btn-secondary" type="button">DURDUR</button>
                         </div>
                     </div>
                 </div>
@@ -259,9 +262,12 @@
                     <div class="stat-card" style="box-shadow: 0 5px 15px -5px var(--primary-glow);"><span class="stat-label">TOPLAM İHLAL</span><span id="violationCount" class="stat-value" style="color: #ff3e3e;">0</span></div>
                 </div>
                 <div class="history-card" style="min-height: 430px;">
-                    <div style="display:flex; justify-content:space-between; margin-bottom:1rem; align-items: center;">
-                        <b style="font-size: 0.95rem; color: #ff3e3e;">İHLAL GEÇMİŞİ</b>
-                        <span class="hint" style="margin-top: 0;">Fotoğrafa tıklayarak büyütebilirsiniz</span>
+                    <div style="display:flex; justify-content:space-between; margin-bottom:1rem; align-items: center; gap: 1rem; flex-wrap: wrap;">
+                        <div>
+                            <b style="font-size: 0.95rem; color: #ff3e3e;">İHLAL GEÇMİŞİ</b>
+                            <div class="hint" style="margin-top: 0;">Fotoğrafa tıklayarak büyütebilirsiniz</div>
+                        </div>
+                        <button class="btn btn-secondary" style="font-weight:700; padding: 10px 16px;" onclick="clearViolations()">TOPLU SİL</button>
                     </div>
                     <div id="historyList" class="history-list">
                         <!-- İhlal Kayıtları buraya gelecek -->
@@ -520,8 +526,20 @@
 
             // Durum Rozeti Güncelle
             const badge = document.getElementById('statusBadge');
-            badge.innerText = d.status === "running" ? "ÇALIŞIYOR" : "DURDURULDU";
-            badge.className = d.status === "running" ? "status-badge status-running" : "status-badge";
+            const statusMessage = document.getElementById('statusMessage');
+            if (d.status === "running") {
+                badge.innerText = "ÇALIŞIYOR";
+                badge.className = "status-badge status-running";
+                statusMessage.innerText = "Kamera ve analiz bekleniyor...";
+            } else if (d.status === "error") {
+                badge.innerText = "HATA";
+                badge.className = "status-badge";
+                statusMessage.innerText = d.error || "Başlatma sırasında hata oluştu.";
+            } else {
+                badge.innerText = "DURDURULDU";
+                badge.className = "status-badge";
+                statusMessage.innerText = d.error ? d.error : "Sunucu hazır";
+            }
         };
 
         // Takibi Başlat Butonu
@@ -530,6 +548,10 @@
             const user = document.getElementById('camUser').value.trim();
             const pass = document.getElementById('camPass').value.trim();
             const limit = parseInt(document.getElementById('timeLimit').value) || 60;
+            const statusMessage = document.getElementById('statusMessage');
+            const startBtn = document.getElementById('startBtn');
+            startBtn.disabled = true;
+            statusMessage.innerText = 'Başlatılıyor...';
             
             // RTSP URL Oluşturma (ip url ise doğrudan al, değilse Dahua şablonu oluştur)
             let source = ip;
@@ -537,28 +559,81 @@
                 source = `rtsp://${user}:${pass}@${ip}:554/cam/realmonitor?channel=1&subtype=0`;
             }
 
-            await fetch("/api/start", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ 
-                    source: source, 
-                    zone_coords: zoneCoords,
-                    time_limit: limit
-                })
-            });
+            try {
+                const res = await fetch("/api/start", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ 
+                        source: source, 
+                        zone_coords: zoneCoords,
+                        time_limit: limit
+                    })
+                });
+                const data = await res.json();
+                if (!res.ok || !data.ok) {
+                    statusMessage.innerText = data.error || 'Takip başlatılamadı.';
+                    alert('Takip başlatılamadı: ' + (data.error || res.statusText));
+                }
+            } catch (err) {
+                statusMessage.innerText = 'Sunucuya bağlanırken hata oluştu.';
+                alert('Takip başlatılamadı: ' + err.message);
+            } finally {
+                startBtn.disabled = false;
+            }
             
             setTimeout(updateHistory, 2000);
         };
 
         // Durdur Butonu
         document.getElementById('stopBtn').onclick = async () => { 
-            await fetch("/api/stop", {method:"POST"}); 
+            const stopBtn = document.getElementById('stopBtn');
+            const startBtn = document.getElementById('startBtn');
+            const badge = document.getElementById('statusBadge');
+            const statusMessage = document.getElementById('statusMessage');
+            stopBtn.disabled = true;
+            statusMessage.innerText = 'Durduruluyor...';
+            try {
+                const res = await fetch("/api/stop", {method:"POST"});
+                if (!res.ok) {
+                    throw new Error(res.statusText);
+                }
+                badge.innerText = 'DURDURULDU';
+                badge.className = 'status-badge';
+                statusMessage.innerText = 'Takip durduruldu.';
+                startBtn.disabled = false;
+            } catch (err) {
+                statusMessage.innerText = 'Durdurma sırasında hata oluştu.';
+                alert('Durdurulamadı: ' + err.message);
+            } finally {
+                stopBtn.disabled = false;
+                updateHistory();
+            }
         };
 
         // Verileri Sıfırla Butonu
         async function resetStats() {
             if (confirm("Tüm istatistikler, veritabanı logları ve kaydedilmiş ihlal ekran görüntüleri silinecektir. Emin misiniz?")) {
                 await fetch("/api/reset", {method:"POST"});
+                updateHistory();
+            }
+        }
+
+        async function deleteViolation(id) {
+            if (!confirm("Bu ihlal kaydını silmek istediğinize emin misiniz?")) return;
+            const res = await fetch("/api/delete_violation", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({id})
+            });
+            if (res.ok) {
+                updateHistory();
+            }
+        }
+
+        async function clearViolations() {
+            if (!confirm("Tüm ihlal geçmişini silmek istediğinize emin misiniz?")) return;
+            const res = await fetch("/api/clear_violations", {method: "POST"});
+            if (res.ok) {
                 updateHistory();
             }
         }
@@ -581,12 +656,13 @@
                 historyList.innerHTML = data.violations.slice(0, 30).map(i => `
                     <div class="history-item">
                         <img src="/${i.image_path}" class="violation-thumb" onclick="openLightbox('/${i.image_path}')" title="Büyütmek için tıklayın">
-                        <div style="flex: 1;">
+                        <div style="flex: 1; min-width: 0;">
                             <div style="font-weight: 600; color: #ff3e3e; font-size: 0.9rem;">Kişi #${i.person_id} İHLAL!</div>
                             <div style="font-size: 0.75rem; color: var(--text-dim); margin-top: 2px;">
                                 ${i.timestamp.split(' ')[1]} • Süre: <span style="color: white; font-weight: 600;">${i.duration}s</span>
                             </div>
                         </div>
+                        <button class="btn btn-secondary" style="font-size:0.75rem; padding: 8px 12px;" onclick="deleteViolation(${i.id})">SİL</button>
                     </div>
                 `).join('');
             }

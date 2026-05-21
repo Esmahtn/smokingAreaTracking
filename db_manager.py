@@ -60,6 +60,28 @@ def get_violations(limit=50):
     conn.close()
     return rows
 
+def delete_violation(violation_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT image_path FROM violations WHERE id = ?", (violation_id,))
+    row = c.fetchone()
+    if row and row[0]:
+        try:
+            os.remove(row[0])
+        except Exception:
+            pass
+    c.execute("DELETE FROM violations WHERE id = ?", (violation_id,))
+    conn.commit()
+    conn.close()
+
+def clear_violations():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM violations")
+    conn.commit()
+    conn.close()
+
+
 def get_hourly_logs():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
