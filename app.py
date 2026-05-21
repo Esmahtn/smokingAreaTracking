@@ -66,17 +66,7 @@ def api_stream():
     def sse():
         while True:
             a = analyzer
-            d = a.stats if a else {
-                "active": 0, 
-                "violation": 0, 
-                "in": 0, 
-                "out": 0, 
-                "fps": 0, 
-                "status": "stopped", 
-                "error": "", 
-                "zone": [0,0,1,1],
-                "time_limit": 60
-            }
+            d = a.stats if a else {"active": 0, "violation": 0, "daily_violation": 0, "in": 0, "out": 0, "fps": 0, "status": "stopped", "error": "", "zone": [0,0,1,1], "time_limit": 60}
             yield f"data: {json.dumps(d)}\n\n"
             time.sleep(0.5)
     return Response(sse(), mimetype="text/event-stream", headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})

@@ -30,13 +30,25 @@ class SmokingAnalyzer:
         model_path: str = "yolov8s.pt",
         zone_coords: list = [0.0, 0.0, 1.0, 1.0], # [x1, y1, x2, y2]
         conf: float = 0.35,
-        time_limit: int = 60
+        time_limit: int = 10,
+        max_fps: int = 0,
+        frame_skip: int = 0,
+        jpeg_quality: int = 75
     ) -> None:
         self.source = source
         self.model_path = model_path
         self.zone_coords = zone_coords # Normalize edilmiş [x1, y1, x2, y2]
         self.conf = conf
         self.time_limit = time_limit
+        self.max_fps = max_fps
+        self.frame_skip = frame_skip
+        self.jpeg_quality = jpeg_quality
+        # Initialize cooldown (seconds) and daily tracking
+        self.COOLDOWN_SECONDS = 2 * 60 * 60  # 2 hours default
+        self.last_violation_time = {}  # real_id -> timestamp of last counted violation
+        self.current_day = datetime.now().date()
+        self.daily_violation_count = 0
+        self.frame_counter = 0  # processed frame count for skipping
 
         self._stop_event = threading.Event()
         self._thread = None
@@ -62,6 +74,7 @@ class SmokingAnalyzer:
             return {
                 "active": self._active_count,
                 "violation": self._violation_count,
+                "daily_violation": self.daily_violation_count,
                 "in": self._active_count,        # AICarCounter uyumluluğu için
                 "out": self._violation_count,    # AICarCounter uyumluluğu için
                 "fps": round(self._fps, 1),
@@ -176,8 +189,43 @@ class SmokingAnalyzer:
             os.makedirs("static/violations", exist_ok=True)
 
             while not self._stop_event.is_set():
+                ret, frame = cap.read()
+                if not ret:
+                    if not is_rtsp:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        continue
+                    else:
+                        logger.warning("Canlı yayın koptu, 5 saniye içinde yeniden bağlanılıyor...")
+                        cap.release()
+                        time.sleep(5)
+                        cap = get_capture(self.source)
+                        continue
+
+                frame_small = cv2.resize(frame, (target_w, target_h))
+                self.frame_counter += 1
+                # If frame_skip is set, process only every (frame_skip+1)th frame
+                if self.frame_skip > 0 and (self.frame_counter % (self.frame_skip + 1)) != 0:
+                    # Skip heavy detection, just encode and enqueue the resized frame
+                    annotated_frame = frame_small.copy()
+                    ok, buf = cv2.imencode(".jpg", annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality])
+                    if ok:
+                        try:
+                            self.frame_queue.put_nowait(buf.tobytes())
+                        except queue.Full:
+                            try:
+                                self.frame_queue.get_nowait()
+                            except:
+                                pass
+                            self.frame_queue.put(buf.tobytes())
+                    continue
                 t0 = time.time()
                 now = datetime.now()
+                # Gün değişimi kontrolü – günlük ihlal sayısını sıfırla
+                today_date = now.date()
+                if today_date != self.current_day:
+                    self.current_day = today_date
+                    self.daily_violation_count = 0
+                    # Not needed to clear last_violation_time (keep for cooldown)
 
                 # Saat başı otomatik sıfırlama
                 if now.hour != last_hour:
@@ -193,17 +241,7 @@ class SmokingAnalyzer:
                     db_manager.add_log(cur_active, cur_viol)
                     last_db_log_time = t0
 
-                ret, frame = cap.read()
-                if not ret:
-                    if not is_rtsp:
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                        continue
-                    else:
-                        logger.warning("Canlı yayın koptu, 5 saniye içinde yeniden bağlanılıyor...")
-                        cap.release()
-                        time.sleep(5)
-                        cap = get_capture(self.source)
-                        continue
+
 
                 with self._lock:
                     curr_zone = self.zone_coords
@@ -347,17 +385,29 @@ class SmokingAnalyzer:
                                 frame_active_count += 1
 
                                 if time_spent > curr_time_limit:
-                                    violators.add(real_id)
-                                    # Kümülatif ihlal takip: tüm ihlal edenler buraya eklenir
-                                    with self._lock:
-                                        self.all_violations_ever.add(real_id)
-                                    color = COLOR_VIOLATION
-                                    text = f"ID:{real_id} IHLAL! ({int(time_spent)}s)"
+                                    # Check cooldown before counting violation
+                                    now_ts = datetime.now().timestamp()
+                                    last_ts = self.last_violation_time.get(real_id, 0)
+                                    if now_ts - last_ts < self.COOLDOWN_SECONDS:
+                                        # Skip counting this violation (still consider as active)
+                                        color = COLOR_ACTIVE
+                                        text = f"ID:{real_id} {int(time_spent)}s"
+                                    else:
+                                        violators.add(real_id)
+                                        # Update daily and total counts
+                                        self.last_violation_time[real_id] = now_ts
+                                        self.daily_violation_count += 1
+                                        with self._lock:
+                                            self.all_violations_ever.add(real_id)
+                                        color = COLOR_VIOLATION
+                                        text = f"ID:{real_id} IHLAL! ({int(time_spent)}s)"
 
-                                    # İHLAL ANININ YAKIN PLAN FOTOĞRAFINI ÇEK (Tek Seferlik)
-                                    if real_id not in self.notified_violations:
-                                        self.notified_violations.add(real_id)
-                                        
+                                        # Reset daily counter if day changed
+                                        today = datetime.now().date()
+                                        if today != self.current_day:
+                                            self.current_day = today
+                                            self.daily_violation_count = 0                                        
+                                            
                                         # Vücut kırpıntısını al (biraz genişletilmiş sınırlarla)
                                         pad_x = int(w * 0.1)
                                         pad_y = int(h * 0.1)
@@ -419,6 +469,12 @@ class SmokingAnalyzer:
                 fps_buf.append(time.time() - t0)
                 if len(fps_buf) > 30: 
                     fps_buf.pop(0)
+                # Enforce max FPS if set
+                elapsed = time.time() - t0
+                if self.max_fps > 0:
+                    target_frame_time = 1.0 / self.max_fps
+                    if elapsed < target_frame_time:
+                        time.sleep(target_frame_time - elapsed)
                 self._fps = 1.0 / (sum(fps_buf) / len(fps_buf))
 
                 # Video Yayını için Kareyi Sıkıştır ve Sıraya Ekle

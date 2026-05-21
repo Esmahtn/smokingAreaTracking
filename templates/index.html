@@ -76,7 +76,7 @@
         .btn-primary { background: var(--primary); color: white; box-shadow: 0 10px 20px -5px var(--primary-glow); }
         .btn-secondary { background: rgba(255, 255, 255, 0.1); color: white; }
 
-        .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
+        .stats-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
         .stat-card { background: var(--card-bg); padding: 1.5rem; border-radius: 20px; border: 1px solid var(--border); transition: 0.3s; }
         .stat-label { font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase; }
         .stat-value { font-size: 2.2rem; font-weight: 800; display: block; }
@@ -260,6 +260,7 @@
                 <div class="stats-grid">
                     <div class="stat-card" style="box-shadow: 0 5px 15px -5px var(--blue-glow);"><span class="stat-label">AKTİF KİŞİ</span><span id="activeCount" class="stat-value" style="color: #3e8bff;">0</span></div>
                     <div class="stat-card" style="box-shadow: 0 5px 15px -5px var(--primary-glow);"><span class="stat-label">TOPLAM İHLAL</span><span id="violationCount" class="stat-value" style="color: #ff3e3e;">0</span></div>
+                    <div class="stat-card" style="box-shadow: 0 5px 15px -5px var(--primary-glow);"><span class="stat-label">GÜNLÜK İHLAL</span><span id="dailyViolationCount" class="stat-value" style="color: #ff3e3e;">0</span></div>
                 </div>
                 <div class="history-card" style="min-height: 430px;">
                     <div style="display:flex; justify-content:space-between; margin-bottom:1rem; align-items: center; gap: 1rem; flex-wrap: wrap;">
@@ -517,6 +518,7 @@
             const d = JSON.parse(e.data);
             document.getElementById('activeCount').innerText = d.active;
             document.getElementById('violationCount').innerText = d.violation;
+            document.getElementById('dailyViolationCount').innerText = d.daily_violation;
             document.getElementById('fpsValue').innerText = d.fps;
             
             // Doughnut Güncelle
