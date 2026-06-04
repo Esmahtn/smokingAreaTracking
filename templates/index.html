@@ -543,6 +543,14 @@
                 badge.innerText = "ÇALIŞIYOR";
                 badge.className = "status-badge status-running";
                 statusMessage.innerText = "Kamera ve analiz bekleniyor...";
+            } else if (d.status === "starting") {
+                badge.innerText = "BAŞLIYOR";
+                badge.className = "status-badge status-starting";
+                statusMessage.innerText = d.error ? d.error : "Analiz başlatılıyor...";
+            } else if (d.status === "reconnecting") {
+                badge.innerText = "YENİDEN BAĞLANIYOR";
+                badge.className = "status-badge status-warning";
+                statusMessage.innerText = d.error ? d.error : "Kamera bağlantısı yenileniyor...";
             } else if (d.status === "error") {
                 badge.innerText = "HATA";
                 badge.className = "status-badge";
@@ -568,7 +576,8 @@
             // RTSP URL Oluşturma (ip url ise doğrudan al, değilse Dahua şablonu oluştur)
             let source = ip;
             if (ip.includes('.') && !ip.startsWith('rtsp') && !ip.startsWith('http')) {
-                source = `rtsp://${user}:${pass}@${ip}:554/cam/realmonitor?channel=1&subtype=0`;
+                const credentials = user && pass ? `${user}:${pass}@` : '';
+                source = `rtsp://${credentials}${ip}:554/cam/realmonitor?channel=1&subtype=0`;
             }
 
             try {
@@ -581,13 +590,23 @@
                         time_limit: limit
                     })
                 });
-                const data = await res.json();
-                if (!res.ok || !data.ok) {
-                    statusMessage.innerText = data.error || 'Takip başlatılamadı.';
-                    alert('Takip başlatılamadı: ' + (data.error || res.statusText));
+                let data = null;
+                let errorText = '';
+                try {
+                    data = await res.json();
+                } catch (parseErr) {
+                    errorText = await res.text();
+                }
+
+                if (!res.ok || !data?.ok) {
+                    const message = data?.error || errorText || res.statusText || 'Takip başlatılamadı.';
+                    statusMessage.innerText = message;
+                    console.error('Start error:', res.status, message, data, errorText);
+                    alert('Takip başlatılamadı: ' + message);
                 }
             } catch (err) {
                 statusMessage.innerText = 'Sunucuya bağlanırken hata oluştu.';
+                console.error('Start request failed:', err);
                 alert('Takip başlatılamadı: ' + err.message);
             } finally {
                 startBtn.disabled = false;

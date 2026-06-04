@@ -27,15 +27,16 @@ class SmokingAnalyzer:
     def __init__(
         self,
         source: str,
-        model_path: str = "yolov8s.pt",
+        model_path: str = "yolov8n.pt",
         zone_coords: list = [0.0, 0.0, 1.0, 1.0], # [x1, y1, x2, y2]
         conf: float = 0.35,
         time_limit: int = 10,
         max_fps: int = 0,
-        frame_skip: int = 0,
-        jpeg_quality: int = 75,
+        frame_skip: int = 1,
+        jpeg_quality: int = 60,
         dynamic_conf: bool = True,
         adaptive_skip: bool = True,
+        use_face_reid: bool = False,
         use_yolov8m: bool = False
     ) -> None:
         self.source = source
@@ -44,6 +45,10 @@ class SmokingAnalyzer:
             logger.warning("yolov8m.pt bulunamadı, yolov8s.pt kullanılacak")
             use_yolov8m = False
         self.model_path = "yolov8m.pt" if use_yolov8m else model_path
+        if self.model_path == "yolov8n.pt" and not os.path.exists("yolov8n.pt"):
+            if os.path.exists("yolov8s.pt"):
+                logger.warning("yolov8n.pt bulunamadı, yolov8s.pt kullanılacak")
+                self.model_path = "yolov8s.pt"
         self.zone_coords = zone_coords # Normalize edilmiş [x1, y1, x2, y2]
         self.conf = conf
         self.base_conf = conf
@@ -53,6 +58,7 @@ class SmokingAnalyzer:
         self.jpeg_quality = jpeg_quality
         self.dynamic_conf = dynamic_conf
         self.adaptive_skip = adaptive_skip
+        self.use_face_reid = use_face_reid
         # Re-ID temporal smoothing için son N embedding sakla
         self.reid_smoothing_window = 5  # Son 5 embedding'i ortamala (artırıldı)
         self.reid_threshold = 0.70  # Re-ID threshold (0.78'den düşürüldü)
@@ -64,6 +70,8 @@ class SmokingAnalyzer:
         self.frame_counter = 0  # processed frame count for skipping
 
         self._stop_event = threading.Event()
+        self._start_event = threading.Event()
+        self._start_ok = None
         self._thread = None
         self._lock = threading.Lock()
 
@@ -106,14 +114,65 @@ class SmokingAnalyzer:
     def is_running(self) -> bool:
         return self._status == "running"
 
+    def _open_capture(self, src):
+        is_rtsp = isinstance(src, str) and src.startswith(("rtsp://", "rtmp://", "http://"))
+        if is_rtsp:
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;30000000"
+            c = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
+            c.set(cv2.CAP_PROP_BUFFERSIZE, 10)
+            c.set(cv2.CAP_PROP_FPS, 30)
+            c.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 30000)
+            c.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 30000)
+            return c
+        return cv2.VideoCapture(src)
+
+    def _reconnect_capture(self, max_attempts=5, base_delay=2):
+        is_rtsp = isinstance(self.source, str) and self.source.startswith(("rtsp://", "rtmp://", "http://"))
+        if not is_rtsp:
+            return False
+
+        for attempt in range(1, max_attempts + 1):
+            if self._stop_event.is_set():
+                return False
+
+            delay = min(base_delay * (2 ** (attempt - 1)), 30)
+            with self._lock:
+                self._status = "reconnecting"
+                self._error_msg = f"RTSP yeniden bağlanıyor... ({attempt}/{max_attempts})"
+
+            if hasattr(self, "_cap") and self._cap is not None:
+                try:
+                    self._cap.release()
+                except Exception as e:
+                    logger.error(f"Reconnect cap.release sırasında hata: {e}")
+
+            logger.warning(f"RTSP yeniden bağlanma denemesi {attempt}/{max_attempts}, {delay} saniye bekleniyor...")
+            time.sleep(delay)
+
+            cap = self._open_capture(self.source)
+            self._cap = cap
+            if cap.isOpened():
+                logger.info("RTSP yeniden bağlantı başarılı.")
+                with self._lock:
+                    self._status = "running"
+                    self._error_msg = ""
+                return True
+
+            logger.warning("RTSP yeniden bağlantı başarısız.")
+
+        return False
+
     def start(self) -> bool:
         if self._status == "running": 
             return False
         self._stop_event.clear()
+        self._start_event.clear()
+        self._start_ok = None
         with self._lock:
             self._active_count = 0
             self._violation_count = 0
-            self._status = "running"
+            self._currently_violating_count = 0
+            self._status = "starting"
             self.notified_violations.clear()
         
         # Watchdog ve cap ilklendirme
@@ -131,6 +190,14 @@ class SmokingAnalyzer:
 
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
+
+        started = self._start_event.wait(timeout=45.0)
+        if not started or not self._start_ok:
+            with self._lock:
+                if self._status != "error":
+                    self._status = "error"
+                    self._error_msg = self._error_msg or "Başlangıç sırasında bilinmeyen hata"
+            return False
         return True
 
     def stop(self) -> None:
@@ -318,25 +385,19 @@ class SmokingAnalyzer:
             max_reconnect_attempts = 10
             reconnect_delay = 2  # İlk deneme 2 saniye
             
-            def get_capture(src):
-                if is_rtsp:
-                    # RTSP optimizasyonları
-                    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;30000000"
-                    c = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
-                    c.set(cv2.CAP_PROP_BUFFERSIZE, 10)  # Buffer daha da artırıldı
-                    c.set(cv2.CAP_PROP_FPS, 30)
-                    # Network timeout daha da artırıldı (30 saniye)
-                    c.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 30000)
-                    c.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 30000)
-                    return c
-                return cv2.VideoCapture(src)
-
-            cap = get_capture(self.source)
+            cap = self._open_capture(self.source)
             self._cap = cap
-            if not cap.isOpened(): 
-                raise RuntimeError(f"Kaynak açilamadi: {self.source}")
+            if not cap.isOpened():
+                logger.warning("Kaynak açılmadı, yeniden bağlanma denemesi başlatılıyor...")
+                if not self._reconnect_capture(max_reconnect_attempts, reconnect_delay):
+                    raise RuntimeError(f"Kaynak açilamadi: {self.source}")
+                cap = self._cap
+            with self._lock:
+                self._status = "running"
+            self._start_ok = True
+            self._start_event.set()
 
-            target_w, target_h = 960, 540
+            target_w, target_h = 640, 360
             
             # Re-ID takip veritabanı — her kayıtta 'embedding' ve 'total_seconds' bulunur
             database = self._load_gallery()
@@ -386,30 +447,17 @@ class SmokingAnalyzer:
                 ret, frame = cap.read()
                 if ret:
                     self.last_frame_time = time.time()
+                t0 = time.time()
                 if not ret:
                     if not is_rtsp:
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                         continue
                     else:
-                        reconnect_attempts += 1
-                        if reconnect_attempts > max_reconnect_attempts:
+                        if not self._reconnect_capture(max_reconnect_attempts, reconnect_delay):
                             logger.error(f"Maksimum yeniden bağlantı denemesi ({max_reconnect_attempts}) aşıldı. Durduruluyor.")
                             break
-                        
-                        # Exponential backoff: 2, 4, 8, 16 saniye
-                        current_delay = min(reconnect_delay * (2 ** (reconnect_attempts - 1)), 30)
-                        logger.warning(f"Canlı yayın koptu (Deneme {reconnect_attempts}/{max_reconnect_attempts}). {current_delay} saniye içinde yeniden bağlanılıyor...")
-                        cap.release()
-                        time.sleep(current_delay)
-                        
-                        cap = get_capture(self.source)
-                        self._cap = cap
-                        if cap.isOpened():
-                            logger.info("Yeniden bağlantı başarılı!")
-                            reconnect_attempts = 0  # Sayaçları sıfırla
-                            self.frame_counter = 0
-                        else:
-                            logger.error("Yeniden bağlantı başarısız. Tekrar deneniyor...")
+                        cap = self._cap
+                        self.frame_counter = 0
                         continue
 
                 frame_small = cv2.resize(frame, (target_w, target_h))
@@ -422,7 +470,7 @@ class SmokingAnalyzer:
                 if self.adaptive_skip and self._active_count == 0:
                     current_skip = min(current_skip + 1, 4)  # Max 4 frame skip when no activity
                 elif self.adaptive_skip and self._active_count > 0:
-                    current_skip = max(current_skip - 1, 0)  # Reduce skip when activity detected
+                    current_skip = self.frame_skip  # Keep the base skip when activity exists
                 
                 # If frame_skip is set, process only every (frame_skip+1)th frame
                 if current_skip > 0 and (self.frame_counter % (current_skip + 1)) != 0:
@@ -438,8 +486,15 @@ class SmokingAnalyzer:
                             except:
                                 pass
                             self.frame_queue.put(buf.tobytes())
+                    elapsed = time.time() - t0
+                    fps_buf.append(elapsed)
+                    if len(fps_buf) > 30:
+                        fps_buf.pop(0)
+                    if len(fps_buf) > 0:
+                        self._fps = 1.0 / (sum(fps_buf) / len(fps_buf))
+                    else:
+                        self._fps = 0.0
                     continue
-                t0 = time.time()
                 processed_frame_idx += 1
                 now = datetime.now()
                 # Gün değişimi kontrolü – günlük ihlal sayısını sıfırla
@@ -490,7 +545,6 @@ class SmokingAnalyzer:
                             logger.info("Sayaçlar sıfırlandı. Re-ID galerisi ve kümülatif süreler korundu.")
 
                 # Çözünürlüğü standardize et (hız ve kararlılık için)
-                frame_small = cv2.resize(frame, (target_w, target_h))
                 annotated_frame = frame_small.copy()
 
                 # İzleme Bölgesi koordinatlarını hesapla
@@ -577,8 +631,7 @@ class SmokingAnalyzer:
                             if is_new_yolo:
                                 crop = frame_small[by1:by2, bx1:bx2]
                                 embedding = feature_extractor.extract(crop)
-                                face_embedding = feature_extractor.extract_face(crop)
-
+                                face_embedding = feature_extractor.extract_face(crop) if self.use_face_reid else None
                                 matched_id = None
 
                                 if embedding is not None:
@@ -744,11 +797,11 @@ class SmokingAnalyzer:
                                     color = COLOR_VIOLATION
                                     text = f"ID:{real_id} IHLAL! ({int(time_spent)}s)"
 
-                                    # Her ziyaret için ayrı SS al - violation_reported flag'i kaldırıldı
-                                    # Kişi bazlı global cooldown - aynı kişi 30 saniyede bir SS alabilir
-                                    global_last_ss = self.last_violation_time.get(real_id, 0)
-                                    if current_time - global_last_ss > 30.0:
+                                    # Her ziyaret için ayrı SS al - yeni oturum başladığında tekrar sayılacak
+                                    session_last_ss = session.get("last_ss_time", 0)
+                                    if current_time - session_last_ss > 30.0:
                                         violators.add(real_id)
+                                        session["last_ss_time"] = current_time
                                         # 🟠 Race Condition Düzeltme: Tüm paylaşılan değişkenler
                                         # tek bir lock bloğunda güncelleniyor
                                         with self._lock:
@@ -847,10 +900,13 @@ class SmokingAnalyzer:
                     target_frame_time = 1.0 / self.max_fps
                     if elapsed < target_frame_time:
                         time.sleep(target_frame_time - elapsed)
-                self._fps = 1.0 / (sum(fps_buf) / len(fps_buf))
+                if len(fps_buf) > 0:
+                    self._fps = 1.0 / (sum(fps_buf) / len(fps_buf))
+                else:
+                    self._fps = 0.0
 
                 # Video Yayını için Kareyi Sıkıştır ve Sıraya Ekle
-                ok, buf = cv2.imencode(".jpg", annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                ok, buf = cv2.imencode(".jpg", annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality])
                 if ok:
                     try:
                         self.frame_queue.put_nowait(buf.tobytes())
@@ -862,11 +918,14 @@ class SmokingAnalyzer:
                         self.frame_queue.put(buf.tobytes())
 
             cap.release()
-            logger.info("Analiz döngüsü sonlandırıldı.")
+            logger.info("Analiz döngüsü sonlandıruldu.")
         except Exception as e:
             logger.exception("Analiz motorunda kritik hata oluştu:")
-            self._status = "error"
-            self._error_msg = str(e)
+            with self._lock:
+                self._status = "error"
+                self._error_msg = str(e)
+            self._start_ok = False
+            self._start_event.set()
         finally:
             if 'database' in locals() and database:
                 self._save_gallery(database)
@@ -875,14 +934,12 @@ class SmokingAnalyzer:
     def _process_queue_loop(self) -> None:
         logger.info("Asenkron görüntü ve veri kayıt iş parçacığı başlatıldı.")
         while not self._stop_event.is_set():
-            # Watchdog Kontrolü: 15 saniyedir kare gelmediyse ve sistem çalışıyorsa re-connect zorla
+            # Watchdog Kontrolü: 15 saniyedir kare gelmediyse ve sistem çalışıyorsa re-connect sinyali ver
             if self._status == "running" and time.time() - getattr(self, "last_frame_time", time.time()) > 15.0:
-                logger.warning("Watchdog uyarısı: 15 saniyedir yeni kare alınamadı! Bağlantı donmuş olabilir. Yeniden başlatılıyor...")
-                if hasattr(self, "_cap") and self._cap is not None:
-                    try:
-                        self._cap.release()
-                    except Exception as e:
-                        logger.error(f"Watchdog cap.release sırasında hata: {e}")
+                logger.warning("Watchdog uyarısı: 15 saniyedir yeni kare alınamadı! Yeniden bağlanma denemesi başlatılıyor...")
+                with self._lock:
+                    self._status = "reconnecting"
+                    self._error_msg = "Kamera kare akışı durdu. Yeniden bağlanılıyor..."
                 self.last_frame_time = time.time()  # Tekrar tekrar tetiklenmeyi engellemek için sıfırla
 
             try:
@@ -897,26 +954,12 @@ class SmokingAnalyzer:
             if task_type == "violation":
                 _, real_id, time_spent, crop_img, target_h, target_w = task
                 try:
+                    ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    ms = int(time.time() * 1000) % 1000
+                    filename = f"violation_{real_id}_{ts_str}_{ms:03d}.jpg"
+                    rel_path = f"static/violations/{filename}"
                     if crop_img is not None and crop_img.size > 0 and crop_img.shape[0] > 0 and crop_img.shape[1] > 0:
-                        # Orta güçlü keskinleştirme filtresi
-                        kernel = np.array([[0,-1,0], [-1,5,-1], [0,-1,0]])
-                        sharpened = cv2.filter2D(crop_img, -1, kernel)
-                        
-                        # Kontrast artırma (CLAHE)
-                        lab = cv2.cvtColor(sharpened, cv2.COLOR_BGR2LAB)
-                        l, a, b = cv2.split(lab)
-                        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-                        l = clahe.apply(l)
-                        enhanced = cv2.merge([l, a, b])
-                        enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
-                        
-                        # Daha yüksek kalite ile kaydet (Kalite 95)
-                        ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        ms = int(time.time() * 1000) % 1000
-                        filename = f"violation_{real_id}_{ts_str}_{ms:03d}.jpg"
-                        rel_path = f"static/violations/{filename}"
-                        saved = cv2.imwrite(rel_path, enhanced, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                        
+                        saved = cv2.imwrite(rel_path, crop_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
                         if saved:
                             db_manager.add_violation(real_id, int(time_spent), rel_path)
                             logger.info(f"Asenkron İhlal Fotoğrafı Kaydedildi: {rel_path}")
@@ -925,10 +968,6 @@ class SmokingAnalyzer:
                             db_manager.add_violation(real_id, int(time_spent), rel_path)
                     else:
                         logger.warning(f"Asenkron crop başarısız, sadece veritabanına kaydediliyor: ID {real_id}")
-                        ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        ms = int(time.time() * 1000) % 1000
-                        filename = f"violation_{real_id}_{ts_str}_{ms:03d}.jpg"
-                        rel_path = f"static/violations/{filename}"
                         db_manager.add_violation(real_id, int(time_spent), rel_path)
                 except Exception as e:
                     logger.error(f"Asenkron ihlal kaydında hata oluştu: {e}")

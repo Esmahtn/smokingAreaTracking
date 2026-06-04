@@ -21,3 +21,6 @@ smoking.db
 
 # İhlal görselleri
 static/violations/
+
+# Log dosyası
+smoking_app.log

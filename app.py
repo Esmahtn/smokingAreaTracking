@@ -90,14 +90,28 @@ def api_start():
     conf = float(b.get("conf", 0.35))
     time_limit = int(b.get("time_limit", 60))
 
+    if not source:
+        return jsonify({"ok": False, "error": "Kaynak URL'si boş."}), 400
+
+    if not source:
+        return jsonify({"ok": False, "error": "Kaynak URL'si boş."}), 400
+
     analyzer = SmokingAnalyzer(
         source=source,
         zone_coords=zone_coords,
         conf=conf,
         time_limit=time_limit
     )
-    ok = analyzer.start()
-    return jsonify({"ok": ok})
+    try:
+        ok = analyzer.start()
+    except Exception as e:
+        logging.exception("Analyzer başlatılırken beklenmedik hata oluştu:")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    if not ok:
+        error_msg = getattr(analyzer, "_error_msg", "Başlatılamadı")
+        return jsonify({"ok": False, "error": error_msg}), 500
+    return jsonify({"ok": True})
 
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
@@ -194,13 +208,11 @@ def _shutdown_analyzer():
     global analyzer
     if analyzer and analyzer.is_running:
         analyzer.stop()
-        logging.info("Analyzer stopped during Flask teardown")
-
-@app.teardown_appcontext
-def teardown(exception):
-    _shutdown_analyzer()
+        logging.info("Analyzer stopped during Flask shutdown")
 
 if __name__ == "__main__":
     os.makedirs("templates", exist_ok=True)
     os.makedirs("static/violations", exist_ok=True)
+    signal.signal(signal.SIGINT, lambda signum, frame: _shutdown_analyzer())
+    signal.signal(signal.SIGTERM, lambda signum, frame: _shutdown_analyzer())
     app.run(host="0.0.0.0", port=5000, threaded=True)
