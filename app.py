@@ -10,6 +10,11 @@ from pathlib import Path
 from flask import Flask, Response, jsonify, render_template, request, send_file
 from smoking_analyzer import SmokingAnalyzer
 import db_manager
+from dotenv import load_dotenv
+
+# .env dosyasından ortam değişkenlerini yükle (RTSP şifresi vb.)
+load_dotenv()
+DEFAULT_RTSP_URL = os.getenv("RTSP_URL", "")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 app = Flask(__name__)
@@ -79,7 +84,7 @@ def api_start():
         analyzer.stop()
     
     # Parametreleri al
-    source = b.get("source", "rtsp://admin:Yt2240cn@192.168.12.71:554/cam/realmonitor?channel=1&subtype=0").strip()
+    source = b.get("source", DEFAULT_RTSP_URL).strip()
     zone_coords = b.get("zone_coords", [0.0, 0.0, 1.0, 1.0])
     conf = float(b.get("conf", 0.35))
     time_limit = int(b.get("time_limit", 60))
@@ -124,7 +129,7 @@ def api_update_time_limit():
 @app.route("/api/reset", methods=["POST"])
 def api_reset():
     if analyzer: 
-        analyzer.reset_counts()
+        analyzer.reset_counts(full_reset=True)
     db_manager.reset_db()
     
     # static/violations dizinindeki resimleri temizle
@@ -143,19 +148,25 @@ def api_reset():
 def api_reports():
     violations = db_manager.get_violations(50)
     logs = db_manager.get_logs(50)
+    daily_stats = db_manager.get_daily_person_stats()
     return jsonify({
         "violations": violations,
-        "logs": logs
+        "logs": logs,
+        "daily_stats": daily_stats
     })
 
-@app.route("/api/delete_violation", methods=["POST"])
-def api_delete_violation():
-    b = request.get_json(silent=True) or {}
-    violation_id = b.get("id")
-    if violation_id is None:
-        return jsonify({"ok": False, "error": "Eksik id parametresi."}), 400
+@app.route("/api/delete_violation/<int:violation_id>", methods=["DELETE"])
+def api_delete_violation(violation_id):
     try:
-        db_manager.delete_violation(int(violation_id))
+        db_manager.delete_violation(violation_id)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route("/api/delete_violations_by_person/<int:person_id>", methods=["DELETE"])
+def api_delete_violations_by_person(person_id):
+    try:
+        db_manager.delete_violations_by_person(person_id)
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

@@ -106,6 +106,21 @@ def clear_violations():
     conn.commit()
     conn.close()
 
+def delete_violations_by_person(person_id):
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    c = conn.cursor()
+    c.execute("SELECT image_path FROM violations WHERE person_id = ?", (person_id,))
+    rows = c.fetchall()
+    for row in rows:
+        if row[0]:
+            try:
+                os.remove(row[0])
+            except Exception:
+                pass
+    c.execute("DELETE FROM violations WHERE person_id = ?", (person_id,))
+    conn.commit()
+    conn.close()
+
 
 def get_hourly_logs():
     conn = sqlite3.connect(DB_PATH, timeout=10.0)

@@ -1,0 +1,23 @@
+# Ortam değişkenleri — kesinlikle commit etme!
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+
+# Re-ID galerisi (büyük binary dosya)
+reid_gallery.pkl
+
+# Veritabanı
+smoking.db
+
+# Model dosyaları (büyük)
+*.pt
+
+# İhlal görselleri
+static/violations/

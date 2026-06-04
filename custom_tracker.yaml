@@ -2,10 +2,21 @@
 # Kıpraşma ve geçici kapanmalar (occlusion) sırasında ID kaybını önlemek için optimize edilmiştir.
 
 tracker_type: bytetrack
-track_high_thresh: 0.4  # İlk eşleştirme için algılama güven eşiği (Hafifçe düşürüldü ki kıpırdanmada kaybolmasın)
-track_low_thresh: 0.1   # İkinci eşleştirme için düşük güven eşiği
-new_track_thresh: 0.45  # Yeni bir takip başlatmak için gereken eşik
-track_buffer: 240       # Kaybolan takipleri hafızada tutma süresi (Kare sayısı). Daha uzun süreyle ID kaybını azaltır.
-match_thresh: 0.8       # İz eşleştirme eşiği (Intersection over Union)
+
+# Yüksek güven eşiği — sahte tespitleri filtreler
+track_high_thresh: 0.45
+
+# Düşük güven kısmı — kısa süreli kapanmalarda izi korur
+track_low_thresh: 0.10
+
+# Yeni iz açmak için gereken minimum güven (düşürüldü - daha kolay yeni track)
+new_track_thresh: 0.45
+
+# Kaybolan izi hafızada tutma süresi (kare sayısı)
+# 30 FPS'de 120 kare = 4 saniye → daha uzun hafıza
+track_buffer: 120
+
+# IoU eşik: düşüldü → daha toleranslı eşleşme (postür değişiklikleri için)
+match_thresh: 0.6
 
 fuse_score: False

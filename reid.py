@@ -33,17 +33,9 @@ class FeatureExtractor:
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
 
-        # InsightFace yüz tanıma modeli
+        # InsightFace yüz tanıma modeli - lazy loading (ilk frame geldiğinde başlatılacak)
         self.face_app = None
-        if INSIGHTFACE_AVAILABLE:
-            try:
-                self.face_app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
-                self.face_app.prepare(ctx_id=-1, det_size=(640, 640))
-                print("InsightFace initialized successfully")
-            except Exception as e:
-                print(f"InsightFace initialization failed: {e}")
-                print("Face recognition will be disabled")
-                self.face_app = None
+        self.face_app_initialized = False
 
     def extract(self, cv2_image):
         if cv2_image is None or cv2_image.size == 0:
@@ -74,8 +66,8 @@ class FeatureExtractor:
             return None
 
     def extract_face(self, cv2_image):
-        """Yüz tanıma için embedding çıkar - InsightFace ile"""
-        if not INSIGHTFACE_AVAILABLE or self.face_app is None:
+        """Yüz tanıma için embedding çıkar - InsightFace ile (lazy loading)"""
+        if not INSIGHTFACE_AVAILABLE:
             return None
             
         if cv2_image is None or cv2_image.size == 0:
@@ -83,6 +75,23 @@ class FeatureExtractor:
 
         h, w = cv2_image.shape[:2]
         if h < 50 or w < 50:  # Yüz için minimum boyut
+            return None
+
+        # Lazy loading - ilk çağrıda InsightFace'i başlat
+        if not self.face_app_initialized:
+            try:
+                self.face_app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
+                self.face_app.prepare(ctx_id=-1, det_size=(640, 640))
+                self.face_app_initialized = True
+                print("InsightFace initialized successfully (lazy loading)")
+            except Exception as e:
+                print(f"InsightFace initialization failed: {e}")
+                print("Face recognition will be disabled")
+                self.face_app = None
+                self.face_app_initialized = True  # Tekrar deneme yapma
+                return None
+
+        if self.face_app is None:
             return None
 
         try:

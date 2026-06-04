@@ -660,21 +660,36 @@
             if (!resHourly.ok) return;
             const hourlyData = await resHourly.json();
 
-            // 1. İhlal Kayıtları Listesini Güncelle (Thumbnail önizlemeli)
+            // 1. İhlal Kayıtları Listesini Güncelle (Aynı kişiye ait SS'leri yan yana göster)
             const historyList = document.getElementById('historyList');
             if (data.violations.length === 0) {
                 historyList.innerHTML = `<div style="text-align:center; color:var(--text-dim); margin-top:2rem; font-size:0.8rem;">Henüz ihlal kaydı bulunmuyor.</div>`;
             } else {
-                historyList.innerHTML = data.violations.slice(0, 30).map(i => `
-                    <div class="history-item">
-                        <img src="/${i.image_path}" class="violation-thumb" onclick="openLightbox('/${i.image_path}')" title="Büyütmek için tıklayın">
-                        <div style="flex: 1; min-width: 0;">
-                            <div style="font-weight: 600; color: #ff3e3e; font-size: 0.9rem;">Kişi #${i.person_id} İHLAL!</div>
-                            <div style="font-size: 0.75rem; color: var(--text-dim); margin-top: 2px;">
-                                ${i.timestamp.split(' ')[1]} • Süre: <span style="color: white; font-weight: 600;">${i.duration}s</span>
-                            </div>
+                // Kişi bazlı grupla
+                const violationsByPerson = {};
+                data.violations.forEach(i => {
+                    if (!violationsByPerson[i.person_id]) {
+                        violationsByPerson[i.person_id] = [];
+                    }
+                    violationsByPerson[i.person_id].push(i);
+                });
+
+                historyList.innerHTML = Object.entries(violationsByPerson).slice(0, 15).map(([personId, violations]) => `
+                    <div class="history-item" style="flex-direction: column; align-items: stretch;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <div style="font-weight: 600; color: #ff3e3e; font-size: 0.9rem;">Kişi #${personId} (${violations.length} SS)</div>
+                            <button class="btn btn-secondary" style="font-size:0.7rem; padding: 6px 10px;" onclick="deleteAllViolationsByPerson(${personId})">HEPSİNİ SİL</button>
                         </div>
-                        <button class="btn btn-secondary" style="font-size:0.75rem; padding: 8px 12px;" onclick="deleteViolation(${i.id})">SİL</button>
+                        <div style="display: flex; gap: 8px; overflow-x: auto; padding-bottom: 8px;">
+                            ${violations.slice(0, 5).map(i => `
+                                <div style="position: relative; flex-shrink: 0;">
+                                    <img src="/${i.image_path}" class="violation-thumb" onclick="openLightbox('/${i.image_path}')" title="Büyütmek için tıklayın">
+                                    <div style="position: absolute; bottom: 2px; left: 2px; background: rgba(0,0,0,0.7); color: white; font-size: 0.65rem; padding: 2px 4px; border-radius: 4px;">${i.timestamp.split(' ')[1]}</div>
+                                    <button class="btn btn-secondary" style="position: absolute; top: 2px; right: 2px; font-size:0.6rem; padding: 4px 6px;" onclick="deleteViolation(${i.id})">×</button>
+                                </div>
+                            `).join('')}
+                            ${violations.length > 5 ? `<div style="display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.05); border-radius: 8px; min-width: 80px; height: 60px; font-size: 0.7rem; color: var(--text-dim);">+${violations.length - 5}</div>` : ''}
+                        </div>
                     </div>
                 `).join('');
             }
@@ -742,6 +757,20 @@
 
         // Otomatik Güncelleme (Her 5 saniyede bir tabloları yeniler)
         setInterval(updateHistory, 5000);
+
+        // Tekil ihlal silme
+        async function deleteViolation(id) {
+            if (!confirm('Bu ihlal kaydını silmek istediğinizden emin misiniz?')) return;
+            const res = await fetch(`/api/delete_violation/${id}`, { method: 'DELETE' });
+            if (res.ok) updateHistory();
+        }
+
+        // Kişi bazlı tüm ihlalleri silme
+        async function deleteAllViolationsByPerson(personId) {
+            if (!confirm(`Kişi #${personId} ait tüm ihlal kayıtlarını silmek istediğinizden emin misiniz?`)) return;
+            const res = await fetch(`/api/delete_violations_by_person/${personId}`, { method: 'DELETE' });
+            if (res.ok) updateHistory();
+        }
 
         window.onload = () => {
             initCharts();
