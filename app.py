@@ -11,6 +11,7 @@ from flask import Flask, Response, jsonify, render_template, request, send_file
 from smoking_analyzer import SmokingAnalyzer
 import db_manager
 from dotenv import load_dotenv
+import signal
 
 # .env dosyasından ortam değişkenlerini yükle (RTSP şifresi vb.)
 load_dotenv()
@@ -188,6 +189,16 @@ def api_clear_violations():
 def api_hourly_report():
     rows = db_manager.get_hourly_logs()
     return jsonify(rows)
+
+def _shutdown_analyzer():
+    global analyzer
+    if analyzer and analyzer.is_running:
+        analyzer.stop()
+        logging.info("Analyzer stopped during Flask teardown")
+
+@app.teardown_appcontext
+def teardown(exception):
+    _shutdown_analyzer()
 
 if __name__ == "__main__":
     os.makedirs("templates", exist_ok=True)
