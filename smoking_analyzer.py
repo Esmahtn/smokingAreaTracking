@@ -27,9 +27,9 @@ class SmokingAnalyzer:
     def __init__(
         self,
         source: str,
-        model_path: str = "yolov8n.pt",
+        model_path: str = "yolov8s.pt",
         zone_coords: list = [0.0, 0.0, 1.0, 1.0], # [x1, y1, x2, y2]
-        conf: float = 0.35,
+        conf: float = 0.25,
         time_limit: int = 10,
         max_fps: int = 0,
         frame_skip: int = 1,
@@ -45,7 +45,11 @@ class SmokingAnalyzer:
             logger.warning("yolov8m.pt bulunamadı, yolov8s.pt kullanılacak")
             use_yolov8m = False
         self.model_path = "yolov8m.pt" if use_yolov8m else model_path
-        if self.model_path == "yolov8n.pt" and not os.path.exists("yolov8n.pt"):
+        if self.model_path == "yolov8s.pt" and not os.path.exists("yolov8s.pt"):
+            if os.path.exists("yolov8n.pt"):
+                logger.warning("yolov8s.pt bulunamadı, yolov8n.pt kullanılacak")
+                self.model_path = "yolov8n.pt"
+        elif self.model_path == "yolov8n.pt" and not os.path.exists("yolov8n.pt"):
             if os.path.exists("yolov8s.pt"):
                 logger.warning("yolov8n.pt bulunamadı, yolov8s.pt kullanılacak")
                 self.model_path = "yolov8s.pt"
@@ -83,6 +87,10 @@ class SmokingAnalyzer:
         self._error_msg = ""
         self._reset_flag = False
         self._full_reset_flag = False
+
+        # Reconnect metrics
+        self.reconnect_attempts = 0
+        self.last_reconnect_time = None
 
         self.frame_queue = queue.Queue(maxsize=2)
         self.violation_queue = queue.Queue()
@@ -135,6 +143,10 @@ class SmokingAnalyzer:
             if self._stop_event.is_set():
                 return False
 
+            # record attempt
+            self.reconnect_attempts = attempt
+            self.last_reconnect_time = time.time()
+
             delay = min(base_delay * (2 ** (attempt - 1)), 30)
             with self._lock:
                 self._status = "reconnecting"
@@ -153,6 +165,9 @@ class SmokingAnalyzer:
             self._cap = cap
             if cap.isOpened():
                 logger.info("RTSP yeniden bağlantı başarılı.")
+                # mark success
+                self.reconnect_attempts = attempt
+                self.last_reconnect_time = time.time()
                 with self._lock:
                     self._status = "running"
                     self._error_msg = ""
@@ -253,19 +268,13 @@ class SmokingAnalyzer:
         norm_brightness = brightness / 255.0
         
         # Karanlıkta daha düşük threshold (daha fazla detection)
-        # Aydınlıkta daha yüksek threshold (daha az false positive)
-        if norm_brightness < 0.3:
-            # Çok karanlık
-            return max(0.20, self.base_conf - 0.10)
-        elif norm_brightness < 0.5:
-            # Karanlık
-            return max(0.25, self.base_conf - 0.05)
-        elif norm_brightness < 0.7:
-            # Normal
+        # Aydınlıkta da eşik artışını sınırlayarak düşük insan kayıplarını azalt
+        if norm_brightness < 0.35:
+            return max(0.18, self.base_conf - 0.05)
+        elif norm_brightness < 0.65:
             return self.base_conf
         else:
-            # Çok aydınlık
-            return min(0.50, self.base_conf + 0.10)
+            return self.base_conf
 
     def _get_smoothed_embedding(self, embedding, history):
         """Temporal smoothing - son N embedding'in ortalamasını al"""

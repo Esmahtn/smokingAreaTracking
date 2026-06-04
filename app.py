@@ -204,6 +204,25 @@ def api_hourly_report():
     rows = db_manager.get_hourly_logs()
     return jsonify(rows)
 
+@app.route("/api/health")
+def api_health():
+    global analyzer
+    if analyzer is None:
+        return jsonify({"ok": True, "analyzer": False})
+    stats = analyzer.stats
+    metrics = {
+        "reconnect_attempts": getattr(analyzer, "reconnect_attempts", 0),
+        "last_reconnect_time": None
+    }
+    lrt = getattr(analyzer, "last_reconnect_time", None)
+    if lrt:
+        try:
+            metrics["last_reconnect_time"] = datetime.fromtimestamp(lrt).isoformat()
+        except Exception:
+            metrics["last_reconnect_time"] = str(lrt)
+
+    return jsonify({"ok": True, "analyzer": True, "stats": stats, "metrics": metrics})
+
 def _shutdown_analyzer():
     global analyzer
     if analyzer and analyzer.is_running:

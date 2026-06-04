@@ -249,6 +249,22 @@
                         </div>
                     </div>
                 </div>
+                <div class="history-card" style="min-height: 110px; margin-top: 1rem;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+                        <b style="font-size: 0.9rem; color: #ff3e3e;">ANALYZER HEALTH</b>
+                        <div class="hint">Bağlantı & yeniden deneme bilgisi</div>
+                    </div>
+                    <div style="display:flex; gap:10px; align-items:center;">
+                        <div style="flex:1;">
+                            <div class="hint">Yeniden Bağlanma Denemeleri</div>
+                            <div id="reconnectAttempts" style="font-weight:800; font-size:1.1rem;">0</div>
+                        </div>
+                        <div style="flex:2;">
+                            <div class="hint">Son Yeniden Bağlanma</div>
+                            <div id="lastReconnect" style="font-weight:600; font-size:0.9rem; color:var(--text-dim);">—</div>
+                        </div>
+                    </div>
+                </div>
 
                 <div class="charts-container">
                     <div class="chart-card"><canvas id="distributionChart"></canvas></div>
@@ -786,6 +802,28 @@
             const res = await fetch(`/api/delete_violations_by_person/${personId}`, { method: 'DELETE' });
             if (res.ok) updateHistory();
         }
+
+        // Health endpoint'i periyodik olarak çek ve göster
+        async function fetchHealth() {
+            try {
+                const res = await fetch('/api/health');
+                if (!res.ok) return;
+                const j = await res.json();
+                if (!j.analyzer) {
+                    document.getElementById('reconnectAttempts').innerText = '—';
+                    document.getElementById('lastReconnect').innerText = 'Analyzer kapalı';
+                    return;
+                }
+                const metrics = j.metrics || {};
+                document.getElementById('reconnectAttempts').innerText = metrics.reconnect_attempts ?? 0;
+                document.getElementById('lastReconnect').innerText = metrics.last_reconnect_time || '—';
+            } catch (err) {
+                // sessizce yut
+            }
+        }
+
+        setInterval(fetchHealth, 5000);
+        fetchHealth();
 
         window.onload = () => {
             initCharts();
