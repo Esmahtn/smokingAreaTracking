@@ -272,13 +272,13 @@ class SmokingAnalyzer:
             def get_capture(src):
                 if is_rtsp:
                     # RTSP optimizasyonları
-                    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;5000000"
+                    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;10000000"
                     c = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
-                    c.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimal buffer for low latency
+                    c.set(cv2.CAP_PROP_BUFFERSIZE, 3)  # Buffer artırıldı
                     c.set(cv2.CAP_PROP_FPS, 30)
-                    # Network timeout (5 saniye)
-                    c.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
-                    c.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
+                    # Network timeout artırıldı (10 saniye)
+                    c.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)
+                    c.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 10000)
                     return c
                 return cv2.VideoCapture(src)
 
@@ -360,12 +360,12 @@ class SmokingAnalyzer:
                 frame_small = cv2.resize(frame, (target_w, target_h))
                 self.frame_counter += 1
                 
-                # Health check - her 10 saniyede bir bağlantı durumunu kontrol et
+                # Health check - her 30 saniyede bir bağlantı durumunu kontrol et
                 current_time = time.time()
-                if is_rtsp and (current_time - last_health_check > health_check_interval):
+                if is_rtsp and (current_time - last_health_check > 30):
                     last_health_check = current_time
                     # FPS çok düşükse bağlantı sorunu olabilir
-                    if self._fps < 1.0 and reconnect_attempts == 0:
+                    if self._fps < 0.5 and reconnect_attempts == 0:
                         logger.warning(f"FPS çok düşük ({self._fps:.1f}), bağlantı kontrol ediliyor...")
                         # Bir frame okumayı dene
                         test_ret, test_frame = cap.read()
@@ -707,10 +707,9 @@ class SmokingAnalyzer:
                                     text = f"ID:{real_id} IHLAL! ({int(time_spent)}s)"
 
                                     # Her ziyaret için ayrı SS al - violation_reported flag'i kaldırıldı
-                                    # Her 5 saniyede bir yeni SS al (flood önlemek için)
-                                    last_ss_time = session.get("last_ss_time", 0)
-                                    if current_time - last_ss_time > 5.0:
-                                        session["last_ss_time"] = current_time
+                                    # Kişi bazlı global cooldown - aynı kişi 30 saniyede bir SS alabilir
+                                    global_last_ss = self.last_violation_time.get(real_id, 0)
+                                    if current_time - global_last_ss > 30.0:
                                         violators.add(real_id)
                                         # 🟠 Race Condition Düzeltme: Tüm paylaşılan değişkenler
                                         # tek bir lock bloğunda güncelleniyor
@@ -728,8 +727,8 @@ class SmokingAnalyzer:
 
                                         # Vücut fotoğrafını kaydet (her 5 saniyede bir)
                                         # Padding artırıldı - daha büyük ve daha net fotoğraf için
-                                        pad_x = int(w * 0.25)  # %10'dan %25'e çıkarıldı
-                                        pad_y = int(h * 0.25)  # %10'dan %25'e çıkarıldı
+                                        pad_x = int(w * 0.50)  # %40'tan %50'e çıkarıldı
+                                        pad_y = int(h * 0.50)  # %40'tan %50'e çıkarıldı
                                         sy1 = max(0, by1 - pad_y)
                                         sy2 = min(target_h, by2 + pad_y)
                                         sx1 = max(0, bx1 - pad_x)
@@ -738,16 +737,28 @@ class SmokingAnalyzer:
                                         crop_img = frame_small[sy1:sy2, sx1:sx2]
                                         # Crop boyut kontrolü - daha güvenli
                                         if crop_img is not None and crop_img.size > 0 and crop_img.shape[0] > 0 and crop_img.shape[1] > 0:
-                                            # Sharpening filter ekle - daha net fotoğraf için
+                                            # Daha güçlü sharpening filter
                                             kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
                                             sharpened = cv2.filter2D(crop_img, -1, kernel)
+                                            
+                                            # Upscale - daha yüksek çözünürlük
+                                            h, w = sharpened.shape[:2]
+                                            upscaled = cv2.resize(sharpened, (w*2, h*2), interpolation=cv2.INTER_CUBIC)
+                                            
+                                            # Kontrast artırma
+                                            lab = cv2.cvtColor(upscaled, cv2.COLOR_BGR2LAB)
+                                            l, a, b = cv2.split(lab)
+                                            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+                                            l = clahe.apply(l)
+                                            enhanced = cv2.merge([l, a, b])
+                                            enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
                                             
                                             # Daha yüksek kalite ile kaydet
                                             ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
                                             ms = int(time.time() * 1000) % 1000
                                             filename = f"violation_{real_id}_{ts_str}_{ms:03d}.jpg"
                                             rel_path = f"static/violations/{filename}"
-                                            saved = cv2.imwrite(rel_path, sharpened, [cv2.IMWRITE_JPEG_QUALITY, 95])  # Kalite 95'e çıkarıldı
+                                            saved = cv2.imwrite(rel_path, enhanced, [cv2.IMWRITE_JPEG_QUALITY, 100])  # Kalite 100'e çıkarıldı
                                             if saved:
                                                 db_manager.add_violation(real_id, int(time_spent), rel_path)
                                                 logger.info(f"İhlal Fotoğrafı Kaydedildi: {rel_path}")
