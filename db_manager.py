@@ -5,7 +5,7 @@ from datetime import datetime
 DB_PATH = "smoking.db"
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS smoking_logs
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -23,7 +23,7 @@ def init_db():
     conn.close()
 
 def add_log(active_count, violation_count):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
     c = conn.cursor()
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     c.execute("INSERT INTO smoking_logs (timestamp, active_count, violation_count) VALUES (?, ?, ?)",
@@ -33,9 +33,11 @@ def add_log(active_count, violation_count):
     return {"timestamp": ts, "active": active_count, "violation": violation_count}
 
 def add_violation(person_id, duration, image_path):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
     c = conn.cursor()
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # Milisaniye hassasiyeti ekle - aynı saniyedeki ihlaller için
+    import time
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S") + f".{int(time.time() * 1000) % 1000:03d}"
     c.execute("INSERT INTO violations (timestamp, person_id, duration, image_path) VALUES (?, ?, ?, ?)",
               (ts, person_id, duration, image_path))
     conn.commit()
@@ -43,25 +45,48 @@ def add_violation(person_id, duration, image_path):
     return {"timestamp": ts, "person_id": person_id, "duration": duration, "image_path": image_path}
 
 def get_logs(limit=50):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
-    c.execute("SELECT * FROM smoking_logs ORDER BY timestamp DESC LIMIT ?", (limit,))
+    c.execute("SELECT * FROM smoking_logs ORDER BY id DESC LIMIT ?", (limit,))
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows
 
 def get_violations(limit=50):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
-    c.execute("SELECT * FROM violations ORDER BY timestamp DESC LIMIT ?", (limit,))
+    # Timestamp'e göre sırala - milisaniye hassasiyeti ile
+    c.execute("SELECT * FROM violations ORDER BY timestamp DESC, id DESC LIMIT ?", (limit,))
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+def get_daily_person_stats():
+    """Kişilerin o günkü toplam sürelerini getir"""
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    # Bugünün tarihini al
+    today = datetime.now().strftime("%Y-%m-%d")
+    # Her kişi için bugünkü ihfal sürelerini topla
+    query = """
+        SELECT person_id, 
+               SUM(duration) as total_duration,
+               COUNT(*) as violation_count
+        FROM violations 
+        WHERE date(timestamp) = ?
+        GROUP BY person_id
+        ORDER BY total_duration DESC
+    """
+    c.execute(query, (today,))
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows
 
 def delete_violation(violation_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
     c = conn.cursor()
     c.execute("SELECT image_path FROM violations WHERE id = ?", (violation_id,))
     row = c.fetchone()
@@ -75,7 +100,7 @@ def delete_violation(violation_id):
     conn.close()
 
 def clear_violations():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
     c = conn.cursor()
     c.execute("DELETE FROM violations")
     conn.commit()
@@ -83,7 +108,7 @@ def clear_violations():
 
 
 def get_hourly_logs():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
     # Her saatin en son/maksimum aktif kişi ve ihlal değerlerini alıyoruz
@@ -101,7 +126,7 @@ def get_hourly_logs():
     return rows
 
 def reset_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
     c = conn.cursor()
     c.execute("DELETE FROM smoking_logs")
     c.execute("DELETE FROM violations")

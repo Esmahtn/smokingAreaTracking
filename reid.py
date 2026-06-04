@@ -3,45 +3,95 @@ import torch.nn as nn
 from torchvision import models, transforms
 from PIL import Image
 import cv2
+import numpy as np
+
+# Yüz tanıma opsiyonel - InsightFace kullan (dlib yerine)
+try:
+    from insightface.app import FaceAnalysis
+    INSIGHTFACE_AVAILABLE = True
+except ImportError:
+    INSIGHTFACE_AVAILABLE = False
 
 class FeatureExtractor:
     def __init__(self):
-        # CPU üzerinde hızlı çalışması için MobileNetV2 kullanıyoruz (İnsan ayırt etmede oldukça etkilidir)
-        self.device = torch.device("cpu")
-        
-        # Önceden ImageNet üzerinde eğitilmiş modeli yükle
-        model = models.mobilenet_v2(pretrained=True)
-        
-        # Sınıflandırma katmanını sil, sadece "özellik çıkaran" (feature extractor) katmanları bırak
-        self.model = nn.Sequential(*list(model.children())[:-1])
+        # MobileNetV3-Small: MobileNetV2'den ~2x daha hızlı, Re-ID için yeterli hassasiyet
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        model = models.mobilenet_v3_small(weights=models.MobileNet_V3_Small_Weights.IMAGENET1K_V1)
+
+        # Sınıflandırma katmanını çıkar, sadece özellik çıkaran kısımları bırak
+        # MobileNetV3-Small: features + avgpool (classifier hariç)
+        self.model = nn.Sequential(model.features, model.avgpool)
         self.model = self.model.to(self.device)
         self.model.eval()
 
-        # Görüntüyü PyTorch'un beklediği formata (tensor) çevirme kuralları
+        # Daha küçük girdi boyutu = daha hızlı inference
+        # 128x64 piksel — yaya Re-ID için standart boyuttan küçük ama yeterli
         self.preprocess = transforms.Compose([
-            transforms.Resize((256, 128)), # Standart yaya / insan boyutu
+            transforms.Resize((128, 64)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
 
+        # InsightFace yüz tanıma modeli
+        self.face_app = None
+        if INSIGHTFACE_AVAILABLE:
+            try:
+                self.face_app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
+                self.face_app.prepare(ctx_id=-1, det_size=(640, 640))
+                print("InsightFace initialized successfully")
+            except Exception as e:
+                print(f"InsightFace initialization failed: {e}")
+                print("Face recognition will be disabled")
+                self.face_app = None
+
     def extract(self, cv2_image):
         if cv2_image is None or cv2_image.size == 0:
             return None
-            
-        # OpenCV'nin BGR formatını RGB'ye çevir
-        img_rgb = cv2.cvtColor(cv2_image, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(img_rgb)
-        
-        input_tensor = self.preprocess(pil_img)
-        input_batch = input_tensor.unsqueeze(0).to(self.device)
 
-        with torch.no_grad():
-            features = self.model(input_batch)
+        h, w = cv2_image.shape[:2]
+        if h < 10 or w < 5:
+            return None
+
+        try:
+            img_rgb = cv2.cvtColor(cv2_image, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(img_rgb)
+
+            input_tensor = self.preprocess(pil_img)
+            input_batch = input_tensor.unsqueeze(0).to(self.device)
+
+            with torch.no_grad():
+                features = self.model(input_batch)
+
+            # 3D feature map → 1D vektör (Embedding)
+            features = features.mean([2, 3])
+
+            # L2 Normalizasyonu (Kosinüs benzerliği için)
+            features = features / (features.norm(p=2, dim=1, keepdim=True) + 1e-8)
+
+            return features.cpu().numpy().flatten()
+        except Exception:
+            return None
+
+    def extract_face(self, cv2_image):
+        """Yüz tanıma için embedding çıkar - InsightFace ile"""
+        if not INSIGHTFACE_AVAILABLE or self.face_app is None:
+            return None
             
-        # 3 Boyutlu feature map'i 1 Boyutlu vektöre (Embedding) çevir
-        features = features.mean([2, 3]) 
-        
-        # L2 Normalizasyonu (Kosinüs benzerliği hesaplamak için gereklidir)
-        features = features / features.norm(p=2, dim=1, keepdim=True)
-        
-        return features.cpu().numpy().flatten()
+        if cv2_image is None or cv2_image.size == 0:
+            return None
+
+        h, w = cv2_image.shape[:2]
+        if h < 50 or w < 50:  # Yüz için minimum boyut
+            return None
+
+        try:
+            # InsightFace ile yüz tespiti ve embedding
+            faces = self.face_app.get(cv2_image)
+            if len(faces) == 0:
+                return None
+            
+            # İlk yüzün embedding'ini al
+            return faces[0].embedding
+        except Exception:
+            return None

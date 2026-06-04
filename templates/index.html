@@ -274,6 +274,16 @@
                         <!-- İhlal Kayıtları buraya gelecek -->
                     </div>
                 </div>
+                
+                <div class="history-card" style="min-height: 250px;">
+                    <div style="display:flex; justify-content:space-between; margin-bottom:1rem; align-items: center;">
+                        <b style="font-size: 0.95rem; color: #ff3e3e;">GÜNLÜK KİŞİ ÖZETİ</b>
+                        <div class="hint">Bugünkü toplam süreler</div>
+                    </div>
+                    <div id="dailyStats" style="overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 5px; padding-top: 5px;">
+                        <!-- Günlük istatistikler buraya gelecek -->
+                    </div>
+                </div>
                 <button onclick="resetStats()" class="btn btn-secondary" style="width:100%; margin-top:1rem; color:var(--primary); font-weight:800;">VERİLERİ SIFIRLA</button>
             </div>
         </div>
@@ -667,6 +677,22 @@
                         <button class="btn btn-secondary" style="font-size:0.75rem; padding: 8px 12px;" onclick="deleteViolation(${i.id})">SİL</button>
                     </div>
                 `).join('');
+            }
+
+            // 1.5 Günlük Kişi İstatistiklerini Güncelle
+            const dailyStatsDiv = document.getElementById('dailyStats');
+            if (data.daily_stats && data.daily_stats.length > 0) {
+                dailyStatsDiv.innerHTML = data.daily_stats.map(i => `
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; background: rgba(255, 255, 255, 0.02); border-radius: 8px; margin-bottom: 8px;">
+                        <div>
+                            <div style="font-weight: 600; color: #ff3e3e; font-size: 0.85rem;">Kişi #${i.person_id}</div>
+                            <div style="font-size: 0.7rem; color: var(--text-dim);">${i.violation_count} kez ihfal</div>
+                        </div>
+                        <div style="font-weight: 800; color: white; font-size: 0.9rem;">${Math.floor(i.total_duration / 60)}dk ${i.total_duration % 60}s</div>
+                    </div>
+                `).join('');
+            } else {
+                dailyStatsDiv.innerHTML = `<div style="text-align:center; color:var(--text-dim); margin-top:1rem; font-size:0.75rem;">Bugün henüz ihfal yok.</div>`;
             }
 
             // 2. Saatlik Yoğunluk Tablosunu Güncelle

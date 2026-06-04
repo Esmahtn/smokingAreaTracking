@@ -7,3 +7,6 @@ ultralytics
 torch
 torchvision
 pillow
+python-dotenv
+insightface
+onnxruntime
