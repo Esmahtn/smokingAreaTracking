@@ -1,11 +1,29 @@
 import sqlite3
 import os
+import logging
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
+from flask import Flask
+import threading
+
+db_lock = threading.Lock()
 
 DB_PATH = "smoking.db"
 
+# Configure rotating file logger
+log_file = os.path.join(os.path.dirname(__file__), "smoking_app.log")
+handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=5)
+formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+handler.setFormatter(formatter)
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+logger.addHandler(handler)
+
+app = Flask(__name__)
+
 def init_db():
-    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH, timeout=30.0)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS smoking_logs
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -23,7 +41,8 @@ def init_db():
     conn.close()
 
 def add_log(active_count, violation_count):
-    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH, timeout=30.0)
     c = conn.cursor()
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     c.execute("INSERT INTO smoking_logs (timestamp, active_count, violation_count) VALUES (?, ?, ?)",
@@ -33,7 +52,8 @@ def add_log(active_count, violation_count):
     return {"timestamp": ts, "active": active_count, "violation": violation_count}
 
 def add_violation(person_id, duration, image_path):
-    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH, timeout=30.0)
     c = conn.cursor()
     # Milisaniye hassasiyeti ekle - aynı saniyedeki ihlaller için
     import time
@@ -45,7 +65,8 @@ def add_violation(person_id, duration, image_path):
     return {"timestamp": ts, "person_id": person_id, "duration": duration, "image_path": image_path}
 
 def get_logs(limit=50):
-    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
     c.execute("SELECT * FROM smoking_logs ORDER BY id DESC LIMIT ?", (limit,))
@@ -54,7 +75,8 @@ def get_logs(limit=50):
     return rows
 
 def get_violations(limit=50):
-    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
     # Timestamp'e göre sırala - milisaniye hassasiyeti ile
@@ -65,7 +87,8 @@ def get_violations(limit=50):
 
 def get_daily_person_stats():
     """Kişilerin o günkü toplam sürelerini getir"""
-    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
     # Bugünün tarihini al
@@ -86,7 +109,8 @@ def get_daily_person_stats():
     return rows
 
 def delete_violation(violation_id):
-    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH, timeout=30.0)
     c = conn.cursor()
     c.execute("SELECT image_path FROM violations WHERE id = ?", (violation_id,))
     row = c.fetchone()
@@ -100,14 +124,16 @@ def delete_violation(violation_id):
     conn.close()
 
 def clear_violations():
-    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH, timeout=30.0)
     c = conn.cursor()
     c.execute("DELETE FROM violations")
     conn.commit()
     conn.close()
 
 def delete_violations_by_person(person_id):
-    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH, timeout=30.0)
     c = conn.cursor()
     c.execute("SELECT image_path FROM violations WHERE person_id = ?", (person_id,))
     rows = c.fetchall()
@@ -123,7 +149,8 @@ def delete_violations_by_person(person_id):
 
 
 def get_hourly_logs():
-    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
     # Her saatin en son/maksimum aktif kişi ve ihlal değerlerini alıyoruz
@@ -141,7 +168,8 @@ def get_hourly_logs():
     return rows
 
 def reset_db():
-    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH, timeout=30.0)
     c = conn.cursor()
     c.execute("DELETE FROM smoking_logs")
     c.execute("DELETE FROM violations")

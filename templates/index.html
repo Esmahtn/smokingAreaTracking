@@ -532,8 +532,8 @@
             document.getElementById('fpsValue').innerText = d.fps;
             
             // Doughnut Güncelle
-            const activeNormal = Math.max(0, d.active - d.violation);
-            distributionChart.data.datasets[0].data = [activeNormal, d.violation];
+            const activeNormal = Math.max(0, d.active - d.currently_violating);
+            distributionChart.data.datasets[0].data = [activeNormal, d.currently_violating];
             distributionChart.update('none');
 
             // Durum Rozeti Güncelle
@@ -758,12 +758,8 @@
         // Otomatik Güncelleme (Her 5 saniyede bir tabloları yeniler)
         setInterval(updateHistory, 5000);
 
-        // Tekil ihlal silme
-        async function deleteViolation(id) {
-            if (!confirm('Bu ihlal kaydını silmek istediğinizden emin misiniz?')) return;
-            const res = await fetch(`/api/delete_violation/${id}`, { method: 'DELETE' });
-            if (res.ok) updateHistory();
-        }
+        
+
 
         // Kişi bazlı tüm ihlalleri silme
         async function deleteAllViolationsByPerson(personId) {

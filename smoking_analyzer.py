@@ -69,6 +69,7 @@ class SmokingAnalyzer:
 
         self._active_count = 0
         self._violation_count = 0
+        self._currently_violating_count = 0
         self._fps = 0.0
         self._status = "stopped"
         self._error_msg = ""
@@ -76,6 +77,8 @@ class SmokingAnalyzer:
         self._full_reset_flag = False
 
         self.frame_queue = queue.Queue(maxsize=2)
+        self.violation_queue = queue.Queue()
+        self._worker_thread = None
         
         # İhlali bildirilen ID'ler (Tekrar tekrar resim çekilmesini önlemek için)
         self.notified_violations = set()
@@ -88,6 +91,7 @@ class SmokingAnalyzer:
             return {
                 "active": self._active_count,
                 "violation": self._violation_count,
+                "currently_violating": getattr(self, "_currently_violating_count", 0),
                 "daily_violation": self.daily_violation_count,
                 "in": self._active_count,        # AICarCounter uyumluluğu için
                 "out": self._violation_count,    # AICarCounter uyumluluğu için
@@ -111,17 +115,37 @@ class SmokingAnalyzer:
             self._violation_count = 0
             self._status = "running"
             self.notified_violations.clear()
+        
+        # Watchdog ve cap ilklendirme
+        self.last_frame_time = time.time()
+        self._cap = None
+
         # Preserve Re-ID gallery across restarts. Existing IDs are retained.
         if os.path.exists("reid_gallery.pkl"):
             logger.info("Re-ID gallery retained across restart.")
+        
+        # Asenkron çalışan kuyruğunu temizle ve iş parçacığını başlat
+        self.violation_queue = queue.Queue()
+        self._worker_thread = threading.Thread(target=self._process_queue_loop, daemon=True)
+        self._worker_thread.start()
+
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
         return True
 
     def stop(self) -> None:
         self._stop_event.set()
+        
+        # Kuyruğa durdurma sinyali gönder
+        if hasattr(self, "violation_queue") and self.violation_queue is not None:
+            self.violation_queue.put(None)
+
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2)
+            
+        if self._worker_thread and self._worker_thread.is_alive():
+            self._worker_thread.join(timeout=2)
+            
         with self._lock:
             self._status = "stopped"
 
@@ -131,6 +155,7 @@ class SmokingAnalyzer:
         with self._lock:
             self._active_count = 0
             self._violation_count = 0
+            self._currently_violating_count = 0
             self._reset_flag = True
             if full_reset:
                 self._full_reset_flag = True
@@ -238,8 +263,32 @@ class SmokingAnalyzer:
             logger.debug(f"Duplikat filtresi: {len(suppressed)} kutu elendi (ayna/yansıma koruma).")
         return kept_boxes, kept_ids
 
+    def _prune_gallery(self, database, max_size=1000, max_age_seconds=172800):
+        """Galeri boyutunu sınırlar ve eski kayıtları siler. (İn-place günceller)"""
+        current_time = time.time()
+        # 1. Yaşa göre silinecekleri belirle (Varsayılan: 2 gün)
+        to_remove = [
+            rid for rid, data in database.items()
+            if current_time - data.get("last_seen_timestamp", 0) >= max_age_seconds
+        ]
+        for rid in to_remove:
+            database.pop(rid, None)
+            
+        # 2. Boyut aşımı durumunda en eski olanları sil (Varsayılan: 1000 kişi)
+        if len(database) > max_size:
+            # last_seen_timestamp'e göre küçükten büyüğe (en eski en başta) sırala
+            sorted_keys = sorted(database.keys(), key=lambda k: database[k].get("last_seen_timestamp", 0))
+            for rid in sorted_keys[:len(database) - max_size]:
+                database.pop(rid, None)
+                
+        deleted_count = len(to_remove) + max(0, len(database) - max_size)
+        if deleted_count > 0:
+            logger.info(f"Re-ID Galeri temizliği yapıldı: {deleted_count} eski kayıt silindi. Yeni galeri boyutu: {len(database)}")
+
     def _save_gallery(self, database):
         try:
+            # Kaydetmeden önce galeriyi buda
+            self._prune_gallery(database)
             with open("reid_gallery.pkl", "wb") as f:
                 pickle.dump(database, f)
         except Exception as e:
@@ -283,6 +332,7 @@ class SmokingAnalyzer:
                 return cv2.VideoCapture(src)
 
             cap = get_capture(self.source)
+            self._cap = cap
             if not cap.isOpened(): 
                 raise RuntimeError(f"Kaynak açilamadi: {self.source}")
 
@@ -313,6 +363,8 @@ class SmokingAnalyzer:
                     _data["total_seconds"] = 0.0
                 if "embedding_history" not in _data:
                     _data["embedding_history"] = []
+                if "last_seen_timestamp" not in _data:
+                    _data["last_seen_timestamp"] = time.time()
             id_map = {}          # yolo_id -> real_id
             yolo_seen = {}       # yolo_id -> last frame index where it was seen
             next_real_id = max(database.keys()) + 1 if database else 0
@@ -332,6 +384,8 @@ class SmokingAnalyzer:
 
             while not self._stop_event.is_set():
                 ret, frame = cap.read()
+                if ret:
+                    self.last_frame_time = time.time()
                 if not ret:
                     if not is_rtsp:
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -349,6 +403,7 @@ class SmokingAnalyzer:
                         time.sleep(current_delay)
                         
                         cap = get_capture(self.source)
+                        self._cap = cap
                         if cap.isOpened():
                             logger.info("Yeniden bağlantı başarılı!")
                             reconnect_attempts = 0  # Sayaçları sıfırla
@@ -405,7 +460,7 @@ class SmokingAnalyzer:
                     with self._lock:
                         cur_active = self._active_count
                         cur_viol = self._violation_count
-                    db_manager.add_log(cur_active, cur_viol)
+                    self.violation_queue.put(("log", cur_active, cur_viol))
                     last_db_log_time = t0
 
 
@@ -460,6 +515,7 @@ class SmokingAnalyzer:
                 current_time = time.time()
                 
                 frame_active_count = 0
+                frame_violating_count = 0
                 violators = set()
                 assigned_real_ids_this_frame = set()
 
@@ -519,139 +575,132 @@ class SmokingAnalyzer:
                             
                             # Sadece yeni bir yolo_id gördüğümüzde Re-ID kontrolü yap
                             if is_new_yolo:
-                                # 1. ÖNCE KONUM VE KUTU ÖRTÜŞME TABANLI HIZLI EŞLEŞTİRME (Postür değişimleri ve kısa süreli kayıplar için)
-                                fallback_id = None
-                                fallback_score = -1.0
-                                for rid, session in active_sessions.items():
-                                    # Bu karede zaten başka birine atanmış ID'leri atla
-                                    if rid in assigned_real_ids_this_frame:
-                                        continue
-                                    if rid in last_seen and current_time - last_seen[rid] < 5.0:
-                                        sbx1, sby1, sbx2, sby2 = session.get("last_box", (0, 0, 0, 0))
-                                        # Kutu kesişim alanı (Overlap) hesabı
-                                        ix1 = max(bx1, sbx1)
-                                        iy1 = max(by1, sby1)
-                                        ix2 = min(bx2, sbx2)
-                                        iy2 = min(by2, sby2)
-                                        iw = max(0, ix2 - ix1)
-                                        ih = max(0, iy2 - iy1)
-                                        intersection = iw * ih
-                                        
-                                        overlap = 0.0
-                                        if intersection > 0:
-                                            area1 = (bx2 - bx1) * (by2 - by1)
-                                            area2 = (sbx2 - sbx1) * (sby2 - sby1)
-                                            min_area = min(area1, area2)
-                                            overlap = intersection / min_area if min_area > 0 else 0.0
-                                        
-                                        cx, cy = session.get("last_center", (None, None))
-                                        dist = np.hypot(bc_x - cx, bc_y - cy) if cx is not None else 999.0
-                                        
-                                        # Kısa süreli görünmeyenlerle örtüşme/yakınlık kontrolü
-                                        # Kalabalık sahneler için mesafe eşiği kutu yüksekliğiyle orantılı
-                                        box_h = by2 - by1
-                                        max_dist = max(60, box_h * 0.6)  # maks 60px veya kutunun %60'ı
-                                        if overlap > 0.10 or dist < max_dist:
-                                            # Örtüşme öncelikli skorlama, yoksa yakınlık tabanlı
-                                            score = overlap if overlap > 0.10 else (1.0 / (dist + 1.0))
-                                            if score > fallback_score:
-                                                fallback_score = score
-                                                fallback_id = rid
+                                crop = frame_small[by1:by2, bx1:bx2]
+                                embedding = feature_extractor.extract(crop)
+                                face_embedding = feature_extractor.extract_face(crop)
 
-                                if fallback_id is not None:
-                                    id_map[yolo_id] = fallback_id
-                                else:
-                                    # 2. YAKINDA AKTİF BİRİ YOKSA, Re-ID İLE VERİTABANINDAN SORGULA
-                                    crop = frame_small[by1:by2, bx1:bx2]
-                                    embedding = feature_extractor.extract(crop)
-                                    
-                                    # Yüz tanıma ekle - vücut embedding'i ile birlikte yüz embedding'i de al
-                                    face_embedding = feature_extractor.extract_face(crop)
+                                matched_id = None
 
-                                    if embedding is not None:
-                                        # Temporal smoothing uygula
-                                        history = []
-                                        best_match_id = None
-                                        best_similarity = -1
-                                        best_face_similarity = -1
+                                if embedding is not None:
+                                    # 1. Veritabanındaki tüm kişilerle olan benzerlikleri hesapla
+                                    best_match_id = None
+                                    best_similarity = -1
+                                    best_face_similarity = -1
 
-                                        for real_id, data in database.items():
-                                            if real_id in assigned_real_ids_this_frame:
-                                                continue
-                                            person_history = data.get("embedding_history", [])
-                                            if person_history:
-                                                smoothed_emb, _ = self._get_smoothed_embedding(embedding.copy(), person_history.copy())
-                                            else:
-                                                smoothed_emb = embedding
-                                            
-                                            # Vücut similarity
-                                            body_sim = self._get_cosine_similarity(smoothed_emb, data["embedding"])
-                                            
-                                            # Yüz similarity - eğer yüz embedding'i varsa
-                                            face_sim = -1
-                                            if face_embedding is not None and "face_embedding" in data:
-                                                face_sim = self._get_cosine_similarity(face_embedding, data["face_embedding"])
-                                            
-                                            # Combined score: yüz varsa %60 yüz + %40 vücut, yoksa %100 vücut
-                                            if face_sim > 0:
-                                                combined_sim = 0.6 * face_sim + 0.4 * body_sim
-                                            else:
-                                                combined_sim = body_sim
-                                            
-                                            if combined_sim > best_similarity:
-                                                best_similarity = combined_sim
-                                                best_match_id = real_id
-                                                best_face_similarity = face_sim
-
-                                        # Threshold: yüz tanıma varsa daha düşük threshold (0.60), yoksa 0.70
-                                        threshold = 0.60 if best_face_similarity > 0 else self.reid_threshold
-                                        
-                                        if best_match_id is not None and best_similarity > threshold:
-                                            id_map[yolo_id] = best_match_id
-                                            old_emb = database[best_match_id]["embedding"]
-                                            new_emb = 0.7 * old_emb + 0.3 * embedding
-                                            database[best_match_id]["embedding"] = new_emb / np.linalg.norm(new_emb)
-                                            database[best_match_id]["embedding_history"] = database[best_match_id].get("embedding_history", [])
-                                            database[best_match_id]["embedding_history"].append(embedding)
-                                            if len(database[best_match_id]["embedding_history"]) > self.reid_smoothing_window:
-                                                database[best_match_id]["embedding_history"] = database[best_match_id]["embedding_history"][-self.reid_smoothing_window:]
-                                            
-                                            # Yüz embedding'ini de güncelle
-                                            if face_embedding is not None:
-                                                if "face_embedding" in database[best_match_id]:
-                                                    old_face = database[best_match_id]["face_embedding"]
-                                                    new_face = 0.7 * old_face + 0.3 * face_embedding
-                                                    database[best_match_id]["face_embedding"] = new_face / np.linalg.norm(new_face)
-                                                else:
-                                                    database[best_match_id]["face_embedding"] = face_embedding
-                                            gallery_dirty = True
+                                    for real_id, data in database.items():
+                                        if real_id in assigned_real_ids_this_frame:
+                                            continue
+                                        person_history = data.get("embedding_history", [])
+                                        if person_history:
+                                            smoothed_emb, _ = self._get_smoothed_embedding(embedding.copy(), person_history.copy())
                                         else:
-                                            # Tamamen yeni bir kişi
-                                            id_map[yolo_id] = next_real_id
-                                            person_data = {
-                                                "embedding": embedding,
-                                                "total_seconds": 0.0,
-                                                "embedding_history": [embedding]
-                                            }
-                                            # Yüz embedding'i de ekle
-                                            if face_embedding is not None:
-                                                person_data["face_embedding"] = face_embedding
-                                            database[next_real_id] = person_data
-                                            next_real_id += 1
-                                            gallery_dirty = True
+                                            smoothed_emb = embedding
+                                        
+                                        body_sim = self._get_cosine_similarity(smoothed_emb, data["embedding"])
+                                        
+                                        face_sim = -1
+                                        if face_embedding is not None and "face_embedding" in data:
+                                            face_sim = self._get_cosine_similarity(face_embedding, data["face_embedding"])
+                                        
+                                        if face_sim > 0:
+                                            combined_sim = 0.6 * face_sim + 0.4 * body_sim
+                                        else:
+                                            combined_sim = body_sim
+                                        
+                                        if combined_sim > best_similarity:
+                                            best_similarity = combined_sim
+                                            best_match_id = real_id
+                                            best_face_similarity = face_sim
+
+                                    # Threshold kontrolü
+                                    threshold = 0.60 if best_face_similarity > 0 else self.reid_threshold
+                                    
+                                    if best_match_id is not None and best_similarity > threshold:
+                                        # Güçlü eşleşme
+                                        matched_id = best_match_id
                                     else:
-                                        # ⚠️ Embedding çıkmadı (kötü kırpma, kapanma vb.)
-                                        # Kişiyi tamamen atlamak yerine yeni ID ile kaydet
-                                        # Böylece aktif sayım ve ihlal takibi doğru çalışır
-                                        logger.debug(f"yolo_id={yolo_id} için embedding çıkarılamadı, yeni ID atanıyor.")
-                                        id_map[yolo_id] = next_real_id
-                                        database[next_real_id] = {
-                                            "embedding": np.zeros(576),  # boş placeholder embedding
-                                            "total_seconds": 0.0,
-                                            "embedding_history": []
-                                        }
-                                        next_real_id += 1
-                                        gallery_dirty = True
+                                        # 2. Güçlü Re-ID eşleşmesi bulunamadıysa, konum tabanlı (Spatial) eşleştirmeyi dene,
+                                        # ancak en iyi adayın benzerliğinin aşırı düşük (örn. farklı kıyafet/kişi) olmadığını kontrol et.
+                                        fallback_id = None
+                                        fallback_score = -1.0
+                                        for rid, session in active_sessions.items():
+                                            if rid in assigned_real_ids_this_frame:
+                                                continue
+                                            if rid in last_seen and current_time - last_seen[rid] < 5.0:
+                                                sbx1, sby1, sbx2, sby2 = session.get("last_box", (0, 0, 0, 0))
+                                                ix1 = max(bx1, sbx1)
+                                                iy1 = max(by1, sby1)
+                                                ix2 = min(bx2, sbx2)
+                                                iy2 = min(by2, sby2)
+                                                iw = max(0, ix2 - ix1)
+                                                ih = max(0, iy2 - iy1)
+                                                intersection = iw * ih
+                                                
+                                                overlap = 0.0
+                                                if intersection > 0:
+                                                    area1 = (bx2 - bx1) * (by2 - by1)
+                                                    area2 = (sbx2 - sbx1) * (sby2 - sby1)
+                                                    min_area = min(area1, area2)
+                                                    overlap = intersection / min_area if min_area > 0 else 0.0
+                                                
+                                                cx, cy = session.get("last_center", (None, None))
+                                                dist = np.hypot(bc_x - cx, bc_y - cy) if cx is not None else 999.0
+                                                
+                                                box_h = by2 - by1
+                                                max_dist = max(60, box_h * 0.6)
+                                                if overlap > 0.10 or dist < max_dist:
+                                                    score = overlap if overlap > 0.10 else (1.0 / (dist + 1.0))
+                                                    if score > fallback_score:
+                                                        fallback_score = score
+                                                        fallback_id = rid
+
+                                        if fallback_id is not None:
+                                            fallback_data = database.get(fallback_id)
+                                            if fallback_data:
+                                                f_emb = fallback_data["embedding"]
+                                                fallback_sim = self._get_cosine_similarity(embedding, f_emb)
+                                                
+                                                # Benzerlik eşiği (0.55). Çok düşükse (farklı kıyafet renkleri vb.), eşlemeyi reddet
+                                                if fallback_sim > 0.55:
+                                                    matched_id = fallback_id
+                                                    logger.debug(f"Konum tabanlı eşleşme onaylandı (Sim: {fallback_sim:.2f}): ID {fallback_id}")
+                                                else:
+                                                    logger.warning(f"Konum uyuştu ancak benzerlik çok düşük (Sim: {fallback_sim:.2f}), eşleşme reddedildi.")
+                                
+                                if matched_id is not None:
+                                    id_map[yolo_id] = matched_id
+                                    database[matched_id]["last_seen_timestamp"] = current_time
+                                    old_emb = database[matched_id]["embedding"]
+                                    new_emb = 0.7 * old_emb + 0.3 * embedding
+                                    database[matched_id]["embedding"] = new_emb / np.linalg.norm(new_emb)
+                                    database[matched_id]["embedding_history"] = database[matched_id].get("embedding_history", [])
+                                    database[matched_id]["embedding_history"].append(embedding)
+                                    if len(database[matched_id]["embedding_history"]) > self.reid_smoothing_window:
+                                        database[matched_id]["embedding_history"] = database[matched_id]["embedding_history"][-self.reid_smoothing_window:]
+                                    
+                                    if face_embedding is not None:
+                                        if "face_embedding" in database[matched_id]:
+                                            old_face = database[matched_id]["face_embedding"]
+                                            new_face = 0.7 * old_face + 0.3 * face_embedding
+                                            database[matched_id]["face_embedding"] = new_face / np.linalg.norm(new_face)
+                                        else:
+                                            database[matched_id]["face_embedding"] = face_embedding
+                                    gallery_dirty = True
+                                else:
+                                    # Tamamen yeni bir kişi
+                                    id_map[yolo_id] = next_real_id
+                                    person_data = {
+                                        "embedding": embedding if embedding is not None else np.zeros(576),
+                                        "total_seconds": 0.0,
+                                        "embedding_history": [embedding] if embedding is not None else [],
+                                        "last_seen_timestamp": current_time
+                                    }
+                                    if face_embedding is not None:
+                                        person_data["face_embedding"] = face_embedding
+                                    database[next_real_id] = person_data
+                                    logger.info(f"Yeni kişi kaydedildi: ID {next_real_id}")
+                                    next_real_id += 1
+                                    gallery_dirty = True
 
                             # Galeriyi diske yaz — sık sık yazmak FPS'i öldürür
                             if gallery_dirty and (current_time - last_gallery_save > 60.0):
@@ -662,6 +711,8 @@ class SmokingAnalyzer:
                                 real_id = id_map[yolo_id]
                                 assigned_real_ids_this_frame.add(real_id)
                                 last_seen[real_id] = current_time
+                                if real_id in database:
+                                    database[real_id]["last_seen_timestamp"] = current_time
                                 
                                 # Eğer bu kişi aktif bir ziyarette değilse yeni oturum başlat
                                 if real_id not in active_sessions:
@@ -689,6 +740,7 @@ class SmokingAnalyzer:
                                 session = active_sessions[real_id]
                                 is_violating = current_time >= session["next_violation_time"]
                                 if is_violating:
+                                    frame_violating_count += 1
                                     color = COLOR_VIOLATION
                                     text = f"ID:{real_id} IHLAL! ({int(time_spent)}s)"
 
@@ -723,42 +775,13 @@ class SmokingAnalyzer:
                                         crop_img = frame_small[sy1:sy2, sx1:sx2]
                                         # Crop boyut kontrolü - daha güvenli
                                         if crop_img is not None and crop_img.size > 0 and crop_img.shape[0] > 0 and crop_img.shape[1] > 0:
-                                            # Orta güçlü sharpening filter
-                                            kernel = np.array([[0,-1,0], [-1,5,-1], [0,-1,0]])
-                                            sharpened = cv2.filter2D(crop_img, -1, kernel)
-                                            
-                                            # Kontrast artırma
-                                            lab = cv2.cvtColor(sharpened, cv2.COLOR_BGR2LAB)
-                                            l, a, b = cv2.split(lab)
-                                            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-                                            l = clahe.apply(l)
-                                            enhanced = cv2.merge([l, a, b])
-                                            enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
-                                            
-                                            # Daha yüksek kalite ile kaydet
-                                            ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-                                            ms = int(time.time() * 1000) % 1000
-                                            filename = f"violation_{real_id}_{ts_str}_{ms:03d}.jpg"
-                                            rel_path = f"static/violations/{filename}"
-                                            saved = cv2.imwrite(rel_path, enhanced, [cv2.IMWRITE_JPEG_QUALITY, 95])  # Kalite 95
-                                            if saved:
-                                                db_manager.add_violation(real_id, int(time_spent), rel_path)
-                                                logger.info(f"İhlal Fotoğrafı Kaydedildi: {rel_path}")
-                                            else:
-                                                logger.error(f"İhlal fotoğrafı kaydedilemedi: {rel_path}")
-                                                # Fotoğraf kaydedilemese bile veritabanına kaydet
-                                                db_manager.add_violation(real_id, int(time_spent), rel_path)
+                                            crop_copy = crop_img.copy()
                                         else:
-                                            # Crop başarısız olsa bile veritabanına kaydet
-                                            logger.warning(f"Crop başarısız, sadece veritabanına kaydediliyor: ID {real_id}")
-                                            ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-                                            ms = int(time.time() * 1000) % 1000
-                                            filename = f"violation_{real_id}_{ts_str}_{ms:03d}.jpg"
-                                            rel_path = f"static/violations/{filename}"
-                                            db_manager.add_violation(real_id, int(time_spent), rel_path)
-                                        
-                                        # Loglama başarılı olduğunu onayla
-                                        logger.info(f"İhlal loglandı: ID {real_id}, Süre: {int(time_spent)}s")
+                                            crop_copy = None
+
+                                        # Görüntü işleme, kaydetme ve veritabanı işlemlerini asenkron sıraya gönder
+                                        self.violation_queue.put(("violation", real_id, time_spent, crop_copy, target_h, target_w))
+                                        logger.info(f"İhlal işleme sırasına eklendi: ID {real_id}, Süre: {int(time_spent)}s")
                                 else:
                                     color = COLOR_ACTIVE
                                     text = f"ID:{real_id} {int(time_spent)}s"
@@ -811,6 +834,7 @@ class SmokingAnalyzer:
                 # İstatistikleri güncelle
                 with self._lock:
                     self._active_count = frame_active_count
+                    self._currently_violating_count = frame_violating_count
                     # Toplam ihlal sayısı zaten her ihlal olayında artırılıyor
 
                 # FPS Hesabı
@@ -847,3 +871,75 @@ class SmokingAnalyzer:
             if 'database' in locals() and database:
                 self._save_gallery(database)
                 logger.info("Re-ID galerisi durdurulurken diske kaydedildi.")
+
+    def _process_queue_loop(self) -> None:
+        logger.info("Asenkron görüntü ve veri kayıt iş parçacığı başlatıldı.")
+        while not self._stop_event.is_set():
+            # Watchdog Kontrolü: 15 saniyedir kare gelmediyse ve sistem çalışıyorsa re-connect zorla
+            if self._status == "running" and time.time() - getattr(self, "last_frame_time", time.time()) > 15.0:
+                logger.warning("Watchdog uyarısı: 15 saniyedir yeni kare alınamadı! Bağlantı donmuş olabilir. Yeniden başlatılıyor...")
+                if hasattr(self, "_cap") and self._cap is not None:
+                    try:
+                        self._cap.release()
+                    except Exception as e:
+                        logger.error(f"Watchdog cap.release sırasında hata: {e}")
+                self.last_frame_time = time.time()  # Tekrar tekrar tetiklenmeyi engellemek için sıfırla
+
+            try:
+                task = self.violation_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+
+            if task is None:
+                break
+
+            task_type = task[0]
+            if task_type == "violation":
+                _, real_id, time_spent, crop_img, target_h, target_w = task
+                try:
+                    if crop_img is not None and crop_img.size > 0 and crop_img.shape[0] > 0 and crop_img.shape[1] > 0:
+                        # Orta güçlü keskinleştirme filtresi
+                        kernel = np.array([[0,-1,0], [-1,5,-1], [0,-1,0]])
+                        sharpened = cv2.filter2D(crop_img, -1, kernel)
+                        
+                        # Kontrast artırma (CLAHE)
+                        lab = cv2.cvtColor(sharpened, cv2.COLOR_BGR2LAB)
+                        l, a, b = cv2.split(lab)
+                        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+                        l = clahe.apply(l)
+                        enhanced = cv2.merge([l, a, b])
+                        enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
+                        
+                        # Daha yüksek kalite ile kaydet (Kalite 95)
+                        ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        ms = int(time.time() * 1000) % 1000
+                        filename = f"violation_{real_id}_{ts_str}_{ms:03d}.jpg"
+                        rel_path = f"static/violations/{filename}"
+                        saved = cv2.imwrite(rel_path, enhanced, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                        
+                        if saved:
+                            db_manager.add_violation(real_id, int(time_spent), rel_path)
+                            logger.info(f"Asenkron İhlal Fotoğrafı Kaydedildi: {rel_path}")
+                        else:
+                            logger.error(f"Asenkron ihlal fotoğrafı kaydedilemedi: {rel_path}")
+                            db_manager.add_violation(real_id, int(time_spent), rel_path)
+                    else:
+                        logger.warning(f"Asenkron crop başarısız, sadece veritabanına kaydediliyor: ID {real_id}")
+                        ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        ms = int(time.time() * 1000) % 1000
+                        filename = f"violation_{real_id}_{ts_str}_{ms:03d}.jpg"
+                        rel_path = f"static/violations/{filename}"
+                        db_manager.add_violation(real_id, int(time_spent), rel_path)
+                except Exception as e:
+                    logger.error(f"Asenkron ihlal kaydında hata oluştu: {e}")
+
+            elif task_type == "log":
+                _, cur_active, cur_viol = task
+                try:
+                    db_manager.add_log(cur_active, cur_viol)
+                    logger.debug(f"Asenkron periyodik log kaydedildi: Aktif={cur_active}, İhlal={cur_viol}")
+                except Exception as e:
+                    logger.error(f"Asenkron log kaydında hata oluştu: {e}")
+
+            self.violation_queue.task_done()
+        logger.info("Asenkron görüntü ve veri kayıt iş parçacığı sonlandırıldı.")
